@@ -42,6 +42,16 @@ import {
 import { MOCK_LOCAL_KEYS, useMockData } from "../lib/mock";
 import { portOnProtocolChange, portWasTouched, vncTakesUsername } from "../lib/hostDraft";
 import { parseConnectTarget } from "../lib/address";
+import {
+  blankSavedCredential,
+  credentialFits,
+  credentialsFor,
+  describeCredential,
+  listSavedCredentials,
+  saveSavedCredential,
+  type SavedCredential,
+  type SavedCredentialKind,
+} from "../lib/savedCredentials";
 import { Dialog, Select } from "./primitives";
 import { IconChevronDown, IconChevronRight } from "./icons";
 import { classNames } from "../lib/util";
@@ -132,6 +142,12 @@ export interface HostDraft {
    * must not move it. Never persisted.
    */
   portTouched?: boolean;
+  /**
+   * The saved credential this host signs in with, or null for one it keeps
+   * itself. While set, the user name and password boxes above are not shown
+   * and not saved.
+   */
+  credentialId: string | null;
 }
 
 export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft>): HostDraft {
@@ -169,6 +185,7 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     sshUser: "",
     vncUser: "",
     portTouched: portWasTouched(h),
+    credentialId: h?.credentialId ?? null,
   };
 }
 
@@ -247,6 +264,9 @@ const SSH_AUTH_CHOICES: ReadonlyArray<readonly [SshAuthKind, string]> = [
   ["agent", "SSH agent"],
 ];
 
+/** The picker's "make a new one" entry; never a credential id. */
+const NEW_CREDENTIAL = "__new__";
+
 const SSH_AUTH_HINT: Record<SshAuthKind, string> = {
   password: "The password for your account on that computer, kept in your system keychain.",
   "key-file": "A private key on this computer. It is read when you connect and never leaves this machine.",
@@ -287,6 +307,23 @@ export function HostDialog({
   const [touched, setTouched] = useState(false);
 
   const set = (patch: Partial<HostDraft>): void => setD((prev) => ({ ...prev, ...patch }));
+
+  // Saved credentials, for the picker. Loaded once; one made from here is
+  // added to the list as it is saved.
+  const [saved, setSaved] = useState<SavedCredential[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [creating, setCreating] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void listSavedCredentials().then((list) => {
+      if (!live) return;
+      setSaved(list);
+      setLoaded(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // A saved host shows the account names it signs in with. They start blank
   // in the draft and arrive a moment later from the keychain; a box the user
@@ -332,6 +369,15 @@ export function HostDialog({
   const setRdp = (patch: Partial<RdpSettings>): void => set({ rdp: { ...rdp, ...patch } });
   const ssh = d.ssh ?? blankSshSettings();
   const setSsh = (patch: Partial<SshSettings>): void => set({ ssh: { ...ssh, ...patch } });
+  // Boundary signs in its own way, so it has no picker.
+  const credCaps = d.protocol === "vnc" || d.protocol === "rdp" || d.protocol === "ssh";
+  const offered = credentialsFor(saved, d.protocol);
+  const named = d.credentialId ? saved.find((c) => c.id === d.credentialId) : undefined;
+  const linked = credCaps && named && credentialFits(named, d.protocol) ? named : null;
+  // Named but not usable: the credential was deleted, or the host was
+  // switched to a protocol it does not fit. Said under the picker.
+  // Only once the list has arrived, so a slow answer is not a deletion.
+  const staleLink = loaded && Boolean(d.credentialId) && !linked;
 
   /**
    * Switching protocol reorganises the form, so it also has to move the port,
@@ -373,11 +419,16 @@ export function HostDialog({
     // of the field.
     const address = parsed.target.address;
     const name = d.friendlyName.trim() || address;
-    onSave({ ...d, address, friendlyName: name });
+    onSave({ ...d, address, friendlyName: name, credentialId: staleLink ? null : d.credentialId });
   };
 
   return (
-    <Dialog title={d.id ? "Edit Host" : "New Host"} onClose={onClose} width={540}>
+    <Dialog
+      title={d.id ? "Edit Host" : "New Host"}
+      // Escape in the credential dialog on top must close that one only.
+      onClose={creating ? () => {} : onClose}
+      width={540}
+    >
       <form
         className="space-y-4"
         onSubmit={(e) => {
@@ -503,6 +554,50 @@ export function HostDialog({
           )}
         </div>
 
+        {/*
+          A saved credential, picked once and shared by every host that names
+          it (issue #98). Only the ones this protocol can use are offered. With
+          one chosen, the host's own user name and password boxes go away:
+          they would be ignored, and a box that is ignored is a lie.
+        */}
+        {credCaps ? (
+          <Field
+            label="Credential"
+            hint={
+              linked
+                ? `${describeCredential(linked)} Changing ${linked.name} changes it for every host that uses it.`
+                : staleLink
+                  ? "The saved credential this host used is gone or does not work with this protocol. Pick another, or enter one for this host."
+                  : offered.length === 0
+                    ? "Save a user name and password (or an SSH key) once and pick it here for any number of hosts."
+                    : "Pick a saved credential, or enter a user name and password for this host only."
+            }
+          >
+            <Select
+              aria-label="Credential"
+              value={linked ? linked.id : ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === NEW_CREDENTIAL) {
+                  setCreating(true);
+                  return;
+                }
+                set({ credentialId: v || null });
+              }}
+            >
+              <option value="">Enter for this host only</option>
+              {offered.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+              <option value={NEW_CREDENTIAL}>New saved credential…</option>
+            </Select>
+          </Field>
+        ) : null}
+
+        {linked ? null : (
+          <>
         {/*
           The logon fields are driven by capability, not by protocol name:
           RDP needs a user name and, for a directory account, a domain; SSH
@@ -682,6 +777,8 @@ export function HostDialog({
               onChange={(e) => set({ password: e.target.value })}
             />
           </Field>
+        )}
+          </>
         )}
 
         <div className="grid grid-cols-2 gap-3">
@@ -937,6 +1034,19 @@ export function HostDialog({
           </button>
         </div>
       </form>
+      {/* Outside the form: a form inside a form is not one. */}
+      {creating ? (
+          <SavedCredentialDialog
+            initial={blankSavedCredential(d.protocol === "ssh" && ssh.auth === "key-file" ? "ssh-key" : "password")}
+            protocol={d.protocol}
+            onClose={() => setCreating(false)}
+            onSaved={(c) => {
+              setCreating(false);
+              setSaved((prev) => [...prev.filter((x) => x.id !== c.id), c]);
+              set({ credentialId: c.id });
+            }}
+          />
+        ) : null}
     </Dialog>
   );
 }
@@ -1915,5 +2025,171 @@ function Field({
         <span className="mt-1 block text-xs text-tertiary">{hint}</span>
       ) : null}
     </label>
+  );
+}
+
+/**
+ * Add or edit one saved credential: a name, a user name, and a password or
+ * an SSH key file with its passphrase. The secret is write only, like every
+ * password box in this app: an empty box keeps what is saved.
+ *
+ * Used from the host editor ("New saved credential…") and from Preferences.
+ * `protocol`, from the editor, limits the kinds to what that host can use.
+ */
+export function SavedCredentialDialog({
+  initial,
+  protocol,
+  onSaved,
+  onClose,
+}: {
+  initial: SavedCredential;
+  protocol?: ProtocolKind;
+  onSaved: (c: SavedCredential) => void;
+  onClose: () => void;
+}): ReactNode {
+  const [c, setC] = useState<SavedCredential>(initial);
+  const [secret, setSecret] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const editing = initial.createdAt > 0;
+  const isKey = c.kind === "ssh-key";
+  const kinds: ReadonlyArray<readonly [SavedCredentialKind, string]> = [
+    ["password", "User name and password"],
+    ["ssh-key", "SSH key"],
+  ];
+  const allowed = kinds.filter(([k]) => !protocol || credentialFits({ kind: k }, protocol));
+  const patch = (p: Partial<SavedCredential>): void => setC((prev) => ({ ...prev, ...p }));
+
+  const save = async (): Promise<void> => {
+    if (!c.name.trim()) {
+      setError("Give it a name, so you can find it in the list.");
+      return;
+    }
+    if (isKey && !c.keyPath?.trim()) {
+      setError("Choose the private key file.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const { saved, outcome } = await saveSavedCredential(
+        { ...c, name: c.name.trim(), domain: isKey ? null : c.domain },
+        secret,
+      );
+      // A locked store keeps the secret and writes it on unlock; the row is
+      // already saved, so the picker can use it now.
+      onSaved(saved ?? { ...c, hasSecret: c.hasSecret || Boolean(secret) });
+      if (outcome === "waiting-for-unlock") setError(null);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog title={editing ? "Edit Saved Credential" : "New Saved Credential"} onClose={onClose} width={480}>
+      <form
+        className="space-y-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          void save();
+        }}
+      >
+        <Field label="Name" hint="How it appears when you pick it for a host">
+          <input
+            data-autofocus
+            className="field"
+            value={c.name}
+            placeholder={isKey ? "Lab key" : "Office admin"}
+            onChange={(e) => patch({ name: e.target.value })}
+          />
+        </Field>
+        {allowed.length > 1 ? (
+          <Field label="Kind">
+            <div className="flex gap-1 rounded-md border border-subtle p-0.5" role="radiogroup" aria-label="Credential kind">
+              {allowed.map(([k, label]) => (
+                <button
+                  key={k}
+                  type="button"
+                  role="radio"
+                  aria-checked={c.kind === k}
+                  className={classNames(
+                    "flex-1 rounded-sm px-3 py-1.5 text-sm",
+                    c.kind === k ? "bg-accent/12 font-medium text-accent" : "text-secondary hover:text-primary",
+                  )}
+                  onClick={() => patch({ kind: k })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </Field>
+        ) : null}
+        <div className={isKey ? "" : "grid grid-cols-2 gap-3"}>
+          <Field
+            label="User name"
+            hint={isKey ? "Leave blank to sign in as the same user as this computer" : "Leave blank to be asked when you connect"}
+          >
+            <input
+              className="field"
+              value={c.username ?? ""}
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              onChange={(e) => patch({ username: e.target.value })}
+            />
+          </Field>
+          {isKey ? null : (
+            <Field label="Domain" hint="Remote Desktop only. Leave blank for a local account.">
+              <input
+                className="field"
+                value={c.domain ?? ""}
+                placeholder="Optional"
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                onChange={(e) => patch({ domain: e.target.value })}
+              />
+            </Field>
+          )}
+        </div>
+        {isKey ? <KeyFileField value={c.keyPath} onChange={(keyPath) => patch({ keyPath })} /> : null}
+        <Field
+          label={isKey ? "Key passphrase" : "Password"}
+          hint={
+            c.hasSecret && !secret
+              ? "A secret is saved in your system keychain. Leave blank to keep it."
+              : isKey
+                ? "Only needed if the key itself is protected. Stored in your system keychain."
+                : "Stored in your system keychain, never in a file"
+          }
+        >
+          <input
+            className="field"
+            type="password"
+            value={secret}
+            placeholder={c.hasSecret ? "••••••••  (unchanged)" : "Optional"}
+            autoComplete="off"
+            onChange={(e) => setSecret(e.target.value)}
+          />
+        </Field>
+        {error ? (
+          <p className="text-xs text-danger" role="alert">
+            {error}
+          </p>
+        ) : null}
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" className="btn-secondary" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="btn-primary" disabled={busy}>
+            {editing ? "Save Credential" : "Add Credential"}
+          </button>
+        </div>
+      </form>
+    </Dialog>
   );
 }

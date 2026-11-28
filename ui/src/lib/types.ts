@@ -136,6 +136,12 @@ export interface HostProfile {
   rdpSettings: string | null;
   /** SSH-only options as a JSON blob; `null` for a non-SSH host. See `ssh.ts`. */
   sshSettings: string | null;
+  /**
+   * The saved credential this host signs in with (see `savedCredentials.ts`),
+   * or null for a host that keeps its own. Optional because a shell older
+   * than saved credentials does not send it.
+   */
+  credentialId?: string | null;
 
   // ---- UI-local only: NOT columns in the hosts table, NOT sent by Rust ----
   /** Client-side flag; the backend has no `favorite` column yet. */
@@ -186,6 +192,7 @@ export function blankHostProfile(protocol: ProtocolKind = "vnc"): HostProfile {
     // column only fills once the user changes something.
     rdpSettings: null,
     sshSettings: null,
+    credentialId: null,
   };
 }
 

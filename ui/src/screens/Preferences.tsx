@@ -9,6 +9,7 @@ import {
   type CredentialStatus,
 } from "../lib/credentialStore";
 import { CREDENTIALS_UNLOCKED, OPEN_CREDENTIAL_UNLOCK } from "../components/CredentialUnlock";
+import { SavedCredentialsSection } from "../components/SavedCredentials";
 import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_FOCUS,
@@ -613,6 +614,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                     </button>
                   ) : null}
                 </div>
+                <SavedCredentialsSection />
                 <Toggle
                   label="Strict certificate pinning"
                   description="Refuse to connect when a server's certificate changes, until you explicitly re-trust it"

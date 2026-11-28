@@ -11,6 +11,7 @@ import {
   resolvedOsHint,
 } from "../lib/types";
 import { classNames, colorFromId, formatBps } from "../lib/util";
+import { hostHasSavedSecret } from "../lib/savedCredentials";
 import { useHosts } from "../state/HostsContext";
 import { useSessions, type TileActivity } from "../state/SessionsContext";
 import { IconBoundary, IconKey, IconMonitor, IconZap, IconEdit, IconLock, IconAlert, IconPlus } from "./icons";
@@ -239,7 +240,7 @@ export function HostTile({
    *  {@link ProtocolBadge} for why it is all-or-nothing. */
   showProtocol?: boolean;
 }): ReactNode {
-  const { thumbnailUrl, requestThumbnail } = useHosts();
+  const { thumbnailUrl, requestThumbnail, savedCredentials } = useHosts();
   const { forKey, livePreviews } = useSessions();
   const [hover, setHover] = useState(false);
 
@@ -342,7 +343,7 @@ export function HostTile({
           >
             {host.friendlyName}
           </span>
-          {host.hasPassword ? (
+          {hostHasSavedSecret(host, savedCredentials) ? (
             <span className="shrink-0 text-tertiary" role="img" aria-label="Password saved">
               <IconKey size={14} />
             </span>
