@@ -106,6 +106,12 @@ export interface HostProfile {
   osHint: OsHint | null;
   serverHint: string | null;
   securityPref: string | null;
+  /**
+   * On a Mac (macOS Screen Sharing) with someone else at its screen:
+   * `"share"` asks to share their screen, `"separate"` logs in to a session
+   * of one's own, null asks each time.
+   */
+  macSession: string | null;
   qualityPref: QualityPreset;
   colorDepth: number | null;
   scalingMode: ScalingMode;
@@ -162,6 +168,7 @@ export function blankHostProfile(protocol: ProtocolKind = "vnc"): HostProfile {
     osHint: "unknown",
     serverHint: null,
     securityPref: null,
+    macSession: null,
     qualityPref: "auto",
     colorDepth: null,
     scalingMode: "fit",
@@ -690,6 +697,16 @@ export type SessionEvent =
       certificate: CertificateDigests | null;
     }
   | { type: "credentials-required"; request: CredentialRequest }
+  /**
+   * A Mac with someone else at its screen asks which session to take. The
+   * handshake waits for `choose_mac_session` (or `cancel_credentials`).
+   * `consoleUser` is the Mac's account name for that person: server
+   * supplied, render as text.
+   */
+  | { type: "mac-session-choice"; consoleUser: string; canShare: boolean; canSeparate: boolean }
+  /** The Mac is asking that person to accept. No connect timeout runs meanwhile. */
+  | { type: "mac-session-waiting"; consoleUser: string }
+  | { type: "mac-session-granted" }
   | { type: "stats"; stats: SessionStats }
   | { type: "error"; message: string }
   /**

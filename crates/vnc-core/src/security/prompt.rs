@@ -65,6 +65,23 @@ pub struct TrustAsk {
 /// The channel the session hands to the security layer for [`TrustAsk`]s.
 pub type TrustPrompt = mpsc::Sender<TrustAsk>;
 
+/// A Mac that has someone else at its screen asks which session to take,
+/// raised from the handshake between ServerInit and the encrypted session.
+///
+/// The session answers on [`reply`](Self::reply): `Some(true)` to share the
+/// screen of the person at the Mac (who is then asked to accept),
+/// `Some(false)` for a separate session, `None` when the viewer cancelled.
+#[derive(Debug)]
+pub struct SessionAsk {
+    pub console_user: String,
+    pub can_share: bool,
+    pub can_separate: bool,
+    pub reply: oneshot::Sender<Option<bool>>,
+}
+
+/// The channel the session hands to the handshake for [`SessionAsk`]s.
+pub type SessionPrompt = mpsc::Sender<SessionAsk>;
+
 /// How many times we ask before giving up on one connection (PRD/10 §3.4).
 /// The first attempt counts, so this is "one prompt plus two retries".
 pub const MAX_CREDENTIAL_ATTEMPTS: u32 = 3;
@@ -96,6 +113,10 @@ pub struct CredentialSource<'a> {
     trust_prompt: Option<&'a TrustPrompt>,
     /// Keys the user approved during this attempt.
     approved: Mutex<Vec<(PinScheme, String)>>,
+    /// Where a Mac's session choice is taken to the user.
+    session_prompt: Option<&'a SessionPrompt>,
+    /// What the user chose at that prompt in this attempt: `true` to share.
+    session_choice: Mutex<Option<bool>>,
 }
 
 impl std::fmt::Debug for CredentialSource<'_> {
@@ -130,6 +151,8 @@ impl<'a> CredentialSource<'a> {
             authenticated: AtomicBool::new(false),
             trust_prompt: None,
             approved: Mutex::new(Vec::new()),
+            session_prompt: None,
+            session_choice: Mutex::new(None),
         }
     }
 
@@ -154,6 +177,8 @@ impl<'a> CredentialSource<'a> {
             authenticated: AtomicBool::new(false),
             trust_prompt: None,
             approved: Mutex::new(Vec::new()),
+            session_prompt: None,
+            session_choice: Mutex::new(None),
         }
     }
 
@@ -161,6 +186,51 @@ impl<'a> CredentialSource<'a> {
     pub fn with_trust_prompt(mut self, prompt: &'a TrustPrompt) -> Self {
         self.trust_prompt = Some(prompt);
         self
+    }
+
+    /// Route a Mac's session choice to the user over `prompt`.
+    pub fn with_session_prompt(mut self, prompt: &'a SessionPrompt) -> Self {
+        self.session_prompt = Some(prompt);
+        self
+    }
+
+    /// What the user chose at the Mac session prompt in this attempt, if it
+    /// was raised: `true` to share the screen of the person at the Mac.
+    pub fn session_choice(&self) -> Option<bool> {
+        *self.session_choice.lock().expect("not poisoned")
+    }
+
+    /// Ask the user which session to take on a Mac with someone at it.
+    ///
+    /// `Ok(Some(share))` is the answer, `Ok(None)` means nobody can be asked
+    /// (no prompt wired up), and a cancelled prompt is
+    /// [`VncError::Cancelled`].
+    pub(crate) async fn ask_session(
+        &self,
+        console_user: &str,
+        can_share: bool,
+        can_separate: bool,
+    ) -> Result<Option<bool>> {
+        let Some(prompt) = self.session_prompt else {
+            return Ok(None);
+        };
+        let (reply, answer) = oneshot::channel();
+        let ask = SessionAsk {
+            console_user: console_user.to_string(),
+            can_share,
+            can_separate,
+            reply,
+        };
+        if prompt.send(ask).await.is_err() {
+            return Ok(None);
+        }
+        match answer.await {
+            Ok(Some(share)) => {
+                *self.session_choice.lock().expect("not poisoned") = Some(share);
+                Ok(Some(share))
+            }
+            Ok(None) | Err(_) => Err(VncError::Cancelled),
+        }
     }
 
     /// Keys the user approved at a trust prompt during this attempt, by scheme.

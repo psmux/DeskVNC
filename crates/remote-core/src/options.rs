@@ -213,6 +213,9 @@ pub struct VncOptions {
     /// here rather than on [`ConnectOptions`] because an SSH tunnel sets it
     /// and a tunnel proves nothing about an RDP host (PRDRDP/00 R26).
     pub allow_insecure: bool,
+    /// Which session to take on a Mac that has someone else at its screen.
+    /// macOS Screen Sharing only; every other server ignores it.
+    pub mac_session: MacSessionChoice,
 }
 
 impl Default for VncOptions {
@@ -222,6 +225,41 @@ impl Default for VncOptions {
             shared: true,
             lossless_refresh: true,
             allow_insecure: false,
+            mac_session: MacSessionChoice::Ask,
+        }
+    }
+}
+
+/// What to do when a Mac offers the choice between the screen of the person
+/// logged in at it and a separate session of the viewer's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum MacSessionChoice {
+    /// Ask the person at this viewer each time.
+    #[default]
+    Ask,
+    /// Share the screen of the person at the Mac, which asks them to accept.
+    Share,
+    /// Log in to a separate session.
+    Separate,
+}
+
+impl MacSessionChoice {
+    /// The stored spelling, as the host record and the agent plane write it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MacSessionChoice::Ask => "ask",
+            MacSessionChoice::Share => "share",
+            MacSessionChoice::Separate => "separate",
+        }
+    }
+
+    /// Read a stored spelling. Anything unknown, or nothing, means ask.
+    pub fn parse(s: Option<&str>) -> Self {
+        match s {
+            Some("share") => MacSessionChoice::Share,
+            Some("separate") => MacSessionChoice::Separate,
+            _ => MacSessionChoice::Ask,
         }
     }
 }

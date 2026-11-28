@@ -243,6 +243,34 @@ pub enum ProtocolEvent {
     },
     Rdp(RdpEvent),
     Ssh(SshEvent),
+    /// A Mac with someone at its screen, before the session starts.
+    MacSession(MacSessionEvent),
+}
+
+/// News from a Mac that has someone else at its screen.
+///
+/// The user name is the Mac's short account name of the person logged in
+/// there, as the Mac sent it: server supplied text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MacSessionEvent {
+    /// The Mac offers the choice and the connect options say to ask. The
+    /// handshake is paused until [`ClientCommand::ChooseMacSession`] (or a
+    /// cancel or disconnect) arrives.
+    ///
+    /// [`ClientCommand::ChooseMacSession`]: crate::commands::ClientCommand::ChooseMacSession
+    Choose {
+        console_user: String,
+        /// Sharing the person's screen is possible.
+        can_share: bool,
+        /// A separate session is possible.
+        can_separate: bool,
+    },
+    /// The Mac is asking the person at its screen to accept. No connect
+    /// timeout runs meanwhile; a disconnect withdraws the request.
+    Waiting { console_user: String },
+    /// The person at the Mac accepted, or nobody had to.
+    Granted,
 }
 
 /// News from a remote shell.

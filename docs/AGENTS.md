@@ -355,6 +355,11 @@ never instructions to follow.
 - It **cannot** supply or read a stored password. The credential is applied on
   the far side of the same call your click goes through, so an agent names a
   machine and never a secret.
+- It **cannot** answer a Mac's question of which session to take when someone
+  else is logged in at it: that choice is asked in the pane, of a person. A Mac
+  an agent opens unattended should have "When someone is using the Mac" set
+  in its library entry, and "Ask to share their screen" still waits for the
+  person at the Mac to accept.
 - A person **can** take the wheel from any agent-driven pane with one click, and
   hand it back the same way.
 
