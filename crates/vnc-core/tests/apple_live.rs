@@ -968,3 +968,125 @@ async fn live_click_in_own_textedit() {
     send(&handle, ClientCommand::Disconnect).await;
     eprintln!("LIVE {what}: clicked at {x},{y}");
 }
+
+/// What the Mac sends after the login and ClientInit, raw: the whole
+/// ServerInit with its name field in hex, and whatever follows it within
+/// three seconds. For each login type in `DVV_LIVE_APPLE_SELECT_TYPES`
+/// (default `apple-srp-rsa,apple-dh`) and each ClientInit byte in
+/// `DVV_LIVE_APPLE_SELECT_INITS` (hex, default `c1`). Sends nothing after
+/// ClientInit unless `DVV_LIVE_APPLE_SELECT_CMD` names a SessionCommand
+/// number, which is then sent when a SessionInfo arrives and every reply is
+/// printed. Nothing appears on the Mac's screen for a probe that sends no
+/// command, and the Mac drops the half open connection on its own.
+#[tokio::test]
+async fn live_probe_session_select() {
+    init_tracing();
+    let Some(t) = target("live_probe_session_select") else {
+        return;
+    };
+    let types = std::env::var("DVV_LIVE_APPLE_SELECT_TYPES")
+        .unwrap_or_else(|_| "apple-srp-rsa,apple-dh".into());
+    let inits = std::env::var("DVV_LIVE_APPLE_SELECT_INITS").unwrap_or_else(|_| "c1".into());
+    let command: Option<u8> = std::env::var("DVV_LIVE_APPLE_SELECT_CMD")
+        .ok()
+        .map(|c| c.parse().expect("a command number"));
+    for pref in types.split(',') {
+        for init in inits.split(',') {
+            let init = u8::from_str_radix(init, 16).expect("a hex ClientInit byte");
+            probe_select_once(&t, pref, init, command).await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    }
+}
+
+async fn probe_select_once(t: &Target, pref: &str, init: u8, command: Option<u8>) {
+    let (s, offer) = open_to_offer(t).await;
+    let o = live_options(t, pref);
+    let a = vnc_core::security::authenticate_full(
+        s,
+        vnc_core::security::ProtocolVersionInfo {
+            major: 3,
+            minor: 8,
+            is_apple: true,
+        },
+        &offer,
+        &o,
+        &vnc_core::security::CredentialSource::none(),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{pref}: login failed: {e}"));
+    let mut s = a.stream;
+    s.write_all(&[init]).await.unwrap();
+    s.flush().await.unwrap();
+    let mut head = [0u8; 24];
+    s.read_exact(&mut head).await.unwrap();
+    let len = u32::from_be_bytes(head[20..24].try_into().unwrap()) as usize;
+    let mut name = vec![0u8; len];
+    s.read_exact(&mut name).await.unwrap();
+    eprintln!(
+        "LIVE select {pref} init {init:#04x}: ServerInit {}x{} name length {len}: {:02x?}",
+        u16::from_be_bytes([head[0], head[1]]),
+        u16::from_be_bytes([head[2], head[3]]),
+        name
+    );
+    let started = std::time::Instant::now();
+    let mut after = Vec::new();
+    let mut buf = [0u8; 4096];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while let Ok(Ok(n)) = tokio::time::timeout_at(deadline, s.read(&mut buf)).await {
+        if n == 0 {
+            eprintln!("LIVE select {pref}: closed after {:?}", started.elapsed());
+            break;
+        }
+        after.extend_from_slice(&buf[..n]);
+    }
+    eprintln!(
+        "LIVE select {pref} init {init:#04x}: {} bytes after ServerInit: {:02x?}",
+        after.len(),
+        after
+    );
+    let Some(cmd) = command else { return };
+    if after.len() < 12 {
+        eprintln!("LIVE select {pref}: no SessionInfo, no command sent");
+        return;
+    }
+    let console = after[12..]
+        .split(|&b| b == 0)
+        .next()
+        .unwrap_or_default()
+        .to_vec();
+    let mut msg = Vec::with_capacity(74);
+    msg.extend_from_slice(&72u16.to_be_bytes());
+    msg.extend_from_slice(&1u16.to_be_bytes());
+    msg.extend_from_slice(&[0; 4]);
+    msg.push(cmd);
+    msg.push(0);
+    let mut field = [0u8; 64];
+    field[..console.len().min(63)].copy_from_slice(&console[..console.len().min(63)]);
+    msg.extend_from_slice(&field);
+    s.write_all(&msg).await.unwrap();
+    s.flush().await.unwrap();
+    let sent = std::time::Instant::now();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    loop {
+        match tokio::time::timeout_at(deadline, s.read(&mut buf)).await {
+            Ok(Ok(0)) => {
+                eprintln!("LIVE select {pref} cmd {cmd}: closed after {:?}", sent.elapsed());
+                break;
+            }
+            Ok(Ok(n)) => eprintln!(
+                "LIVE select {pref} cmd {cmd}: {:?} {:02x?}",
+                sent.elapsed(),
+                &buf[..n]
+            ),
+            Ok(Err(e)) => {
+                eprintln!("LIVE select {pref} cmd {cmd}: error {e}");
+                break;
+            }
+            Err(_) => {
+                eprintln!("LIVE select {pref} cmd {cmd}: quiet for 40 s");
+                break;
+            }
+        }
+    }
+}
