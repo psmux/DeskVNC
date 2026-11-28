@@ -219,6 +219,7 @@ fn main() {
             // matching read direction deliberately does not exist.
             "provide_credentials",
             "cancel_credentials",
+            "choose_mac_session",
             "pending_credential_request",
             // "Add to saved hosts" on a tab: whether a session has a proven
             // credential (a yes or no, never the secret), and turning the

@@ -87,7 +87,14 @@ const url = buf.byteLength ? URL.createObjectURL(new Blob([buf], { type: "image/
 `passthrough`, `viewOnly`, `sshTunnel`, `wolMac`, `wolBroadcast`, `networkId`,
 `certPin`, `hasPassword`, `thumbnailAt`, `lastConnected`, `connectCount`,
 `tags` (tag ids joined from `host_tags`), `createdAt`, `updatedAt`,
-`protocol`, `rdpSettings`, `sshSettings`, `credentialId`.
+`protocol`, `rdpSettings`, `sshSettings`, `macSession`, `credentialId`.
+
+`macSession` is for macOS Screen Sharing: what to do when someone else is
+logged in at the Mac. `"share"` asks to share that person's screen (they get a
+prompt on the Mac and have to accept), `"separate"` logs in to a session of
+one's own, and `null` (or any value this build does not know) asks each time.
+Other servers ignore it. A webview that predates the field omits it and the
+column keeps its value only if that webview sends the profile it read.
 
 `credentialId` names the saved credential the host signs in with (see
 [Saved credentials](#saved-credentials-commandscredentialsrs)), or is `null`
@@ -387,6 +394,7 @@ Results stream as events; these commands do not return hosts.
 | `trust_certificate` | `invoke("trust_certificate", { sessionId, fingerprint, permanent })` | `void` |
 | `provide_credentials` | `invoke("provide_credentials", { sessionId, username, password, save })` | `void` |
 | `cancel_credentials` | `invoke("cancel_credentials", { sessionId })` | `void` |
+| `choose_mac_session` | `invoke("choose_mac_session", { sessionId, share })` | `void`, see `mac-session-choice` below |
 | `session_credential_state` | `invoke("session_credential_state", { sessionId })` | `SessionCredentialState`, see below |
 | `bind_session_to_host` | `invoke("bind_session_to_host", { sessionId, hostId, saveCredentials })` | `{ credentialsSaved: boolean }`, see below |
 | `fullscreen_session` | `invoke("fullscreen_session", { sessionId, fullscreen, monitorIndex? })` | `void` |
@@ -768,6 +776,9 @@ discriminator, there is no nested `event` object.
 | `bell` |, |
 | `certificate-prompt` | `fingerprint`, `subject`, `isChange`, `scheme` (**camelCase**). `scheme` is `"tls"` (VeNCrypt X.509), `"ra2"` (RealVNC RSA) or `"rdp-tls"` (an RDP server's own certificate). It is plumbing, not copy: the UI hands it back to `trust_certificate` unchanged so the pin lands under the key the user actually looked at. One host can serve VNC over VeNCrypt and RDP on 3389 with two unrelated certificates, and sharing one row would mean a certificate approved for one protocol silently vouching for the other. `certificate` is `{ thumbprint, sha256 }` (colon separated hex) for a key that came in an X.509 certificate, and `null` for a bare RA2 key: `thumbprint` is the certificate's SHA-1, which Windows shows as Thumbprint, and `sha256` is the certificate's SHA-256. Both are for matching by eye; `fingerprint` (the SHA-256 of the public key) is still the only value pinned |
 | `credentials-required` | `request`, a `CredentialRequest` (**camelCase**); the session is PAUSED until `provide_credentials`/`cancel_credentials` |
+| `mac-session-choice` | `consoleUser`, `canShare`, `canSeparate`. macOS Screen Sharing only, raised when someone else is logged in at the Mac and the host's `macSession` says to ask. The session is PAUSED until `choose_mac_session` (`share: true` asks that person to share their screen, `false` takes a separate session) or `cancel_credentials`. `consoleUser` is the Mac's short account name for that person, **untrusted**, render as text only |
+| `mac-session-waiting` | `consoleUser`. The Mac is asking that person to accept. The connect timeout does not run meanwhile; the core gives up after three minutes, and `disconnect_session` withdraws the request. A refusal or that give up arrives as a terminal `state-changed` with `can_retry: false` and a reason that names the person |
+| `mac-session-granted` | none. The Mac let the session start, with or without asking anyone |
 | `stats` | `stats`, `SessionStats`, fields **snake_case** |
 | `error` | `message` |
 | `ended` | `durationS`, the session task is fully gone |

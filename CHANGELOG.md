@@ -12,6 +12,17 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Added
 
+* Connecting to a Mac that someone else is logged in to now offers the same
+  choice as Apple's Screen Sharing: ask that person for permission to share
+  their screen, or log in to a separate session of your own. While the Mac
+  waits for them to accept, the window says so and offers to cancel the
+  request, and the connect timeout does not cut the wait short. If they
+  decline, or the request times out, the window says that too and does not
+  keep dialling them. Each computer in the library can remember the answer,
+  under Advanced, "When someone is using the Mac" (issue #95).
+* A Mac whose screen changes hands during a shared session (a login, a lock,
+  a user switch) is asked for the whole picture again, so the view does not
+  freeze.
 * Saved credentials (#98). Save a user name and password, or an SSH key file
   with its passphrase, once under a name, and pick it in the host editor's
   new Credential list for as many hosts as use it. A host points at the saved
@@ -27,6 +38,11 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   that uses it and offers to keep a copy on each of them, or to let them ask
   for a password on the next connect. Existing hosts keep their own
   credentials and are not changed by the upgrade.
+
+### Changed
+
+* The phone app keeps taking a separate session on such a Mac, as before,
+  until it has a way to show the choice.
 
 ## [0.36.9] (2026-11-28)
 

@@ -119,6 +119,7 @@
     "allow-provide-credentials",
     "allow-pending-credential-request",
     "allow-cancel-credentials",
+    "allow-choose-mac-session",
     "allow-session-credential-state",
     "allow-bind-session-to-host",
     "allow-open-session-window",

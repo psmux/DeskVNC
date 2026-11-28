@@ -28,8 +28,8 @@ pub mod vencrypt;
 pub mod vnc_auth;
 
 pub use prompt::{
-    CredentialAsk, CredentialPrompt, CredentialSource, TrustAsk, TrustPrompt,
-    MAX_CREDENTIAL_ATTEMPTS,
+    CredentialAsk, CredentialPrompt, CredentialSource, SessionAsk, SessionPrompt, TrustAsk,
+    TrustPrompt, MAX_CREDENTIAL_ATTEMPTS,
 };
 pub use vencrypt::VeNCryptSubtype;
 

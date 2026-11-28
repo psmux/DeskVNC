@@ -496,6 +496,7 @@ pub fn command_name(command: &ClientCommand) -> &'static str {
         ClientCommand::ResizeTerminal { .. } => "resize-terminal",
         ClientCommand::ProvideCredentials { .. } => "provide-credentials",
         ClientCommand::CancelCredentials => "cancel-credentials",
+        ClientCommand::ChooseMacSession { .. } => "choose-mac-session",
         ClientCommand::TrustCertificate { .. } => "trust-certificate",
         ClientCommand::ReconnectNow => "reconnect-now",
         ClientCommand::Disconnect => "disconnect",

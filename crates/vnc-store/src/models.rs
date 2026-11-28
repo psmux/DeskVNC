@@ -91,6 +91,13 @@ pub struct HostProfile {
     #[serde(default)]
     pub ssh_settings: Option<String>,
 
+    /// On a Mac with someone else at its screen: `"ask"`, `"share"` (their
+    /// screen, after they accept) or `"separate"` (a session of one's own).
+    /// `None` is ask. Free text, read with `MacSessionChoice::parse`, so a
+    /// value a newer build wrote stays readable. `#[serde(default)]` for a
+    /// webview that predates the field, as with `ssh_settings`.
+    #[serde(default)]
+    pub mac_session: Option<String>,
     /// The saved credential this host signs in with, a
     /// [`crate::CredentialProfile`] id, or `None` for a host that keeps its
     /// own user name and password (the only kind there was before 0.37).
@@ -163,6 +170,7 @@ impl Default for HostProfile {
             protocol: vnc_protocol(),
             rdp_settings: None,
             ssh_settings: None,
+            mac_session: None,
             credential_id: None,
         }
     }

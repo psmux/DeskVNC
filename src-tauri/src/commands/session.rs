@@ -166,6 +166,7 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
             | remote_core::events::SshEvent::ResetTerminal(_),
         )) => return None,
         SessionEvent::Protocol(ProtocolEvent::Ssh(event)) => ssh_event_json(event.clone())?,
+        SessionEvent::Protocol(ProtocolEvent::MacSession(event)) => mac_session_event_json(event)?,
         // A protocol this build's `remote-core` knows about and this match
         // does not. Dropped rather than guessed at, and the compiler makes
         // adding one a decision here rather than a silent omission.
@@ -215,6 +216,34 @@ fn ssh_event_json(event: remote_core::events::SshEvent) -> Option<serde_json::Va
         SshEvent::Output(_) | SshEvent::ResetTerminal(_) => return None,
         // A variant a newer `remote-core` added. Dropped rather than guessed
         // at, the same rule the outer match follows.
+        _ => return None,
+    })
+}
+
+/// A Mac with someone at its screen, before the session starts. The user
+/// name is the Mac's account name for the person there: SERVER SUPPLIED, so
+/// the UI renders it as text only.
+fn mac_session_event_json(
+    event: &remote_core::events::MacSessionEvent,
+) -> Option<serde_json::Value> {
+    use remote_core::events::MacSessionEvent;
+    use serde_json::json;
+    Some(match event {
+        MacSessionEvent::Choose {
+            console_user,
+            can_share,
+            can_separate,
+        } => json!({
+            "type": "mac-session-choice",
+            "consoleUser": console_user,
+            "canShare": can_share,
+            "canSeparate": can_separate,
+        }),
+        MacSessionEvent::Waiting { console_user } => {
+            json!({ "type": "mac-session-waiting", "consoleUser": console_user })
+        }
+        MacSessionEvent::Granted => json!({ "type": "mac-session-granted" }),
+        // A variant a newer `remote-core` added: dropped, as above.
         _ => return None,
     })
 }
@@ -1389,6 +1418,11 @@ pub async fn connect_session(
         _ => {
             let vnc = options.vnc_mut();
             vnc.security_pref = profile.as_ref().and_then(|p| p.security_pref.clone());
+            // On a Mac with someone at its screen: ask, share their screen,
+            // or a separate session. A connect with no profile asks.
+            vnc.mac_session = remote_core::MacSessionChoice::parse(
+                profile.as_ref().and_then(|p| p.mac_session.as_deref()),
+            );
             // Auto lossless refresh (PRD/09 §3.2): after motion stops, repaint
             // the regions that were JPEG-compressed at full quality. Global
             // preference, on a metered link the user may prefer to keep the
@@ -2439,6 +2473,23 @@ fn qualified_username(
         return username;
     }
     Some(format!("{domain}\\{user}"))
+}
+
+/// Answer a `mac-session-choice`: `share` asks the person at the Mac to share
+/// their screen, otherwise a separate session. Dismissing the choice is
+/// `cancel_credentials`, and a disconnect withdraws a request still waiting.
+#[tauri::command]
+pub async fn choose_mac_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    share: bool,
+) -> Result<(), String> {
+    send_command(
+        &state,
+        &session_id,
+        ClientCommand::ChooseMacSession { share },
+    )
+    .await
 }
 
 /// Dismiss a `credentials-required` prompt: abandon the connection attempt and

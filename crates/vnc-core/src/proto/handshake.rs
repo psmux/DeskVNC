@@ -15,6 +15,9 @@ pub struct ServerInit {
     pub height: u16,
     pub pixel_format: PixelFormat,
     pub name: String,
+    /// The name field as it came, for a Mac that packs flags into it (see
+    /// `apple::select::parse_extended_name`).
+    pub name_bytes: Vec<u8>,
 }
 
 /// Send the one-byte ClientInit (shared flag).
@@ -56,6 +59,7 @@ where
         height,
         pixel_format,
         name,
+        name_bytes,
     })
 }
 
@@ -253,6 +257,7 @@ mod tests {
             height: 1800,
             pixel_format: PixelFormat::bgra8888(),
             name: "mac".into(),
+            name_bytes: b"mac".to_vec(),
         };
         let caps = build_capabilities(&neg, &si, SecurityType::AppleDh);
         assert!(caps.is_apple_screen_sharing);
@@ -274,6 +279,7 @@ mod tests {
             height: 1080,
             pixel_format: PixelFormat::bgra8888(),
             name: "tiger".into(),
+            name_bytes: b"tiger".to_vec(),
         };
         let caps = build_capabilities(&neg, &si, SecurityType::VncAuth);
         assert!(caps.supports_h264);

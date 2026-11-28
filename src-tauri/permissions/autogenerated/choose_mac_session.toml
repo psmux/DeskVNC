@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-choose-mac-session"
+description = "Enables the choose_mac_session command without any pre-configured scope."
+commands.allow = ["choose_mac_session"]
+
+[[permission]]
+identifier = "deny-choose-mac-session"
+description = "Denies the choose_mac_session command without any pre-configured scope."
+commands.deny = ["choose_mac_session"]

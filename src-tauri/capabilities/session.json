@@ -56,6 +56,7 @@
     "allow-pending-credential-request",
     "allow-boundary-permission",
     "allow-cancel-credentials",
+    "allow-choose-mac-session",
     "allow-fullscreen-session",
 
     "core:webview:default",

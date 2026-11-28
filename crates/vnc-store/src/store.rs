@@ -135,7 +135,14 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE hosts ADD COLUMN ssh_settings TEXT;
     "#,
-    // v5, saved credentials a host can point at instead of holding its own
+    // Which session to take on a Mac with someone else at its screen. NULL
+    // means ask, so every existing row keeps today's meaning without a
+    // default. An older build's upsert does not name the column and so
+    // leaves it as it is.
+    r#"
+    ALTER TABLE hosts ADD COLUMN mac_session TEXT;
+    "#,
+    // v6, saved credentials a host can point at instead of holding its own
     // (issue #98). One row per credential, with nothing secret in it: the
     // password or key passphrase lives in the keychain under
     // `credential:<id>`, exactly as a host's lives under its own id, and
@@ -290,10 +297,10 @@ impl Store {
                 security_pref, quality_pref, color_depth, scaling_mode, keyboard_mode,
                 passthrough, view_only, ssh_tunnel, wol_mac, wol_broadcast, network_id,
                 cert_pin, has_password, thumbnail_at, last_connected, connect_count,
-                created_at, updated_at, protocol, rdp_settings, ssh_settings,
+                created_at, updated_at, protocol, rdp_settings, ssh_settings, mac_session,
                 credential_id
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
-                       ?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
+                       ?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)
              ON CONFLICT(id) DO UPDATE SET
                 friendly_name=excluded.friendly_name, address=excluded.address,
                 port=excluded.port, group_id=excluded.group_id, os_hint=excluded.os_hint,
@@ -307,7 +314,8 @@ impl Store {
                 thumbnail_at=excluded.thumbnail_at, last_connected=excluded.last_connected,
                 connect_count=excluded.connect_count, updated_at=excluded.updated_at,
                 protocol=excluded.protocol, rdp_settings=excluded.rdp_settings,
-                ssh_settings=excluded.ssh_settings, credential_id=excluded.credential_id",
+                ssh_settings=excluded.ssh_settings, mac_session=excluded.mac_session,
+                credential_id=excluded.credential_id",
             params![
                 profile.id,
                 profile.friendly_name,
@@ -341,6 +349,7 @@ impl Store {
                 profile.protocol,
                 profile.rdp_settings,
                 profile.ssh_settings,
+                profile.mac_session,
                 profile.credential_id.as_deref().filter(|id| !id.is_empty()),
             ],
         )?;
@@ -1029,6 +1038,7 @@ fn host_from_row(row: &Row<'_>) -> rusqlite::Result<HostProfile> {
             .unwrap_or_else(|| ProtocolKind::Vnc.as_str().to_string()),
         rdp_settings: row.get("rdp_settings")?,
         ssh_settings: row.get("ssh_settings")?,
+        mac_session: row.get("mac_session")?,
         credential_id: row.get("credential_id")?,
     })
 }
@@ -1078,6 +1088,7 @@ mod tests {
             network_id: Some("home-wifi".into()),
             cert_pin: Some("ab".repeat(32)),
             has_password: true,
+            mac_session: Some("share".into()),
             ..Default::default()
         }
     }
@@ -1118,6 +1129,7 @@ mod tests {
                 ("hosts", "protocol"),
                 ("hosts", "rdp_settings"),
                 ("hosts", "ssh_settings"),
+                ("hosts", "mac_session"),
                 ("hosts", "credential_id"),
                 ("history", "protocol"),
             ] {
@@ -1165,6 +1177,7 @@ mod tests {
         assert!(got.has_password);
         assert_eq!(got.ssh_tunnel, host.ssh_tunnel);
         assert_eq!(got.cert_pin, host.cert_pin);
+        assert_eq!(got.mac_session.as_deref(), Some("share"));
         assert_eq!(got.created_at, host.created_at);
 
         // Update (upsert on same id) preserves created_at.
@@ -1811,7 +1824,7 @@ mod tests {
         );
         // Bump deliberately when a migration is added, so that adding one
         // is a decision recorded here rather than a silent schema drift.
-        assert_eq!(MIGRATIONS.len(), 5);
+        assert_eq!(MIGRATIONS.len(), 6);
 
         let got = store
             .get_host("host-uuid-1")
@@ -1830,6 +1843,7 @@ mod tests {
         assert_eq!(got.cert_pin.as_deref(), Some("ab12"));
         assert!(got.ssh_tunnel.is_some());
 
+        assert_eq!(got.mac_session, None, "an old row asks, as it always did");
         assert_eq!(got.protocol, "vnc", "every pre-RDP row was a VNC profile");
         assert_eq!(got.protocol_kind(), Some(ProtocolKind::Vnc));
         assert!(
