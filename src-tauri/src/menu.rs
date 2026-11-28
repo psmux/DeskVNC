@@ -325,8 +325,14 @@ fn build(app: &AppHandle) -> tauri::Result<SessionMenu> {
     // so the submenu is disabled for a VNC session rather than offering
     // choices that would do nothing.
     let resolution = SubmenuBuilder::new(app, tr("Resolution"))
-        .item(&check!("menu:res:connect", tr("Match This Window When Connecting")))
-        .item(&check!("menu:res:follow", tr("Match This Window, and Keep Matching")))
+        .item(&check!(
+            "menu:res:connect",
+            tr("Match This Window When Connecting")
+        ))
+        .item(&check!(
+            "menu:res:follow",
+            tr("Match This Window, and Keep Matching")
+        ))
         .separator()
         .item(&check!("menu:res:1280x720", "1280 x 720"))
         .item(&check!("menu:res:1366x768", "1366 x 768"))
@@ -341,7 +347,10 @@ fn build(app: &AppHandle) -> tauri::Result<SessionMenu> {
     let pointers = SubmenuBuilder::new(app, tr("Pointers"))
         .item(&check!("menu:remote-cursor", tr("Show the Remote Pointer")))
         .separator()
-        .item(&check!("menu:cursor:standard", tr("My Pointer: Standard Arrow")))
+        .item(&check!(
+            "menu:cursor:standard",
+            tr("My Pointer: Standard Arrow")
+        ))
         .item(&check!("menu:cursor:dot", tr("My Pointer: Dot")))
         .item(&check!("menu:cursor:off", tr("My Pointer: Hidden")))
         .build()?;
@@ -377,7 +386,10 @@ fn build(app: &AppHandle) -> tauri::Result<SessionMenu> {
         .item(&check!("menu:scale-fit", tr("Fit to Window")))
         .item(&check!("menu:scale-aspect", tr("Aspect Fit")))
         .item(&check!("menu:scale-actual", tr("Actual Size")))
-        .item(&check!("menu:scale-remote", tr("Remote Resize (Match Window)")))
+        .item(&check!(
+            "menu:scale-remote",
+            tr("Remote Resize (Match Window)")
+        ))
         .separator()
         .item(&action!("menu:zoom-in", tr("Zoom In")))
         .item(&action!("menu:zoom-out", tr("Zoom Out")))
@@ -410,20 +422,35 @@ fn build(app: &AppHandle) -> tauri::Result<SessionMenu> {
     // video playing on the remote needs (measured: a right-click menu went
     // from 2208 ms to 346 ms once Auto dropped the quality by itself).
     let quality = SubmenuBuilder::new(app, tr("Quality"))
-        .item(&check!("menu:quality:auto", tr("Auto (sharp when idle, faster under load)")))
-        .item(&check!("menu:quality:high", tr("Sharp (best picture, never adapts)")))
+        .item(&check!(
+            "menu:quality:auto",
+            tr("Auto (sharp when idle, faster under load)")
+        ))
+        .item(&check!(
+            "menu:quality:high",
+            tr("Sharp (best picture, never adapts)")
+        ))
         .item(&check!("menu:quality:medium", tr("Balanced")))
-        .item(&check!("menu:quality:low", tr("Responsive (softer picture, lowest lag)")))
+        .item(&check!(
+            "menu:quality:low",
+            tr("Responsive (softer picture, lowest lag)")
+        ))
         .item(&check!("menu:quality:bw", tr("Black & White")))
         .separator()
         .item(&gray)
         .separator()
-        .item(&check!("menu:always-refresh", tr("Always Request Fresh Frames")))
+        .item(&check!(
+            "menu:always-refresh",
+            tr("Always Request Fresh Frames")
+        ))
         .build()?;
     gated_menus.push(quality.clone());
 
     let keyboard = SubmenuBuilder::new(app, tr("Keyboard"))
-        .item(&check!("menu:passthrough", tr("Pass System Shortcuts to Remote")))
+        .item(&check!(
+            "menu:passthrough",
+            tr("Pass System Shortcuts to Remote")
+        ))
         .separator()
         .item(&action!("menu:send-cad", tr("Send Ctrl+Alt+Del")))
         .item(&action!("menu:send-cmd-tab", tr("Send Cmd/Alt+Tab")))
@@ -450,7 +477,10 @@ fn build(app: &AppHandle) -> tauri::Result<SessionMenu> {
         .separator()
         .item(&keyboard)
         .separator()
-        .item(&action!("menu:clipboard-send", tr("Send Clipboard to Remote")))
+        .item(&action!(
+            "menu:clipboard-send",
+            tr("Send Clipboard to Remote")
+        ))
         .item(&files)
         .item(&action!("menu:screenshot", tr("Save Screenshot")))
         .build()?;
@@ -864,8 +894,14 @@ mod tests {
     fn file_transfer_is_never_offered_on_an_ssh_tab() {
         // The probe answer an SSH tab inherits from the desktop tab before it
         // must not turn the item back on.
-        assert_eq!(files_item(true, true, true), (false, files_label_terminal()));
-        assert_eq!(files_item(true, false, true), (false, files_label_terminal()));
+        assert_eq!(
+            files_item(true, true, true),
+            (false, files_label_terminal())
+        );
+        assert_eq!(
+            files_item(true, false, true),
+            (false, files_label_terminal())
+        );
     }
 
     #[test]

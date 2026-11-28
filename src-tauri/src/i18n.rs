@@ -158,7 +158,10 @@ mod tests {
         assert_eq!(resolve("system", &langs(&["zh-Hans-CN", "en-US"])), "zh-CN");
         assert_eq!(resolve("system", &langs(&["fr-FR", "zh-CN"])), "zh-CN");
         assert_eq!(resolve("system", &langs(&["zh_CN"])), "zh-CN");
-        assert_eq!(resolve("system", &langs(&["fr-FR", "en-GB", "zh-CN"])), "en");
+        assert_eq!(
+            resolve("system", &langs(&["fr-FR", "en-GB", "zh-CN"])),
+            "en"
+        );
         assert_eq!(resolve("system", &langs(&["zh-TW"])), "en");
         assert_eq!(resolve("system", &langs(&["zh-Hant-HK", "zh-CN"])), "zh-CN");
         assert_eq!(resolve("system", &[]), "en");
@@ -179,7 +182,10 @@ mod tests {
 
     #[test]
     fn falls_back_to_the_english_for_anything_untranslated() {
-        assert_eq!(tr_in("zh-CN", "No such menu item, ever"), "No such menu item, ever");
+        assert_eq!(
+            tr_in("zh-CN", "No such menu item, ever"),
+            "No such menu item, ever"
+        );
         assert_eq!(tr_in("en", "Disconnect"), "Disconnect");
         assert_ne!(tr_in("zh-CN", "Disconnect"), "Disconnect");
     }
@@ -208,7 +214,10 @@ mod tests {
         assert!(labels.len() > 50, "found only {} labels", labels.len());
         for (code, _) in CATALOGS {
             let catalog = &catalogs()[code];
-            let missing: Vec<&String> = labels.iter().filter(|l| !catalog.contains_key(*l)).collect();
+            let missing: Vec<&String> = labels
+                .iter()
+                .filter(|l| !catalog.contains_key(*l))
+                .collect();
             assert!(missing.is_empty(), "{code} is missing {missing:?}");
         }
     }
