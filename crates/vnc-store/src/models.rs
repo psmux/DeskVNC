@@ -90,6 +90,14 @@ pub struct HostProfile {
     /// predating this field would fail every save with "invalid args".
     #[serde(default)]
     pub ssh_settings: Option<String>,
+
+    /// On a Mac with someone else at its screen: `"ask"`, `"share"` (their
+    /// screen, after they accept) or `"separate"` (a session of one's own).
+    /// `None` is ask. Free text, read with `MacSessionChoice::parse`, so a
+    /// value a newer build wrote stays readable. `#[serde(default)]` for a
+    /// webview that predates the field, as with `ssh_settings`.
+    #[serde(default)]
+    pub mac_session: Option<String>,
 }
 
 impl HostProfile {
@@ -148,6 +156,7 @@ impl Default for HostProfile {
             protocol: vnc_protocol(),
             rdp_settings: None,
             ssh_settings: None,
+            mac_session: None,
         }
     }
 }

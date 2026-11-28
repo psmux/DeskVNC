@@ -55,6 +55,7 @@ import { useHostDragSelect, type DropTarget } from "../hooks/useHostDragSelect";
 import { HostTile, DiscoveredTile, addressLabel, osLabel } from "../components/HostTile";
 import { CommandPalette, type PaletteAction } from "../components/CommandPalette";
 import { HostDialog, draftFromHost, type HostDraft } from "../components/HostDialog";
+import { storeMacSessionPref } from "../lib/macSession";
 import { loadRdpDefaults } from "../lib/rdpDefaults";
 import { draftFromRdpImport } from "../lib/rdpImport";
 import { QuickConnect } from "../components/QuickConnect";
@@ -911,6 +912,7 @@ export function Library({
         groupId: draft.groupId,
         osHint: draft.osHint,
         securityPref: draft.securityPref,
+        macSession: draft.protocol === "vnc" ? storeMacSessionPref(draft.macSession) : null,
         qualityPref: draft.qualityPref,
         scalingMode: draft.scalingMode,
         keyboardMode: draft.keyboardMode,

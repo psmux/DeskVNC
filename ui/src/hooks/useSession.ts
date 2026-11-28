@@ -45,6 +45,7 @@ import type {
   SessionStats,
 } from "../lib/types";
 import { DEFAULT_PORT, isProtocolKind } from "../lib/types";
+import { macShareWithdrawn, type MacSessionPrompt } from "../lib/macSession";
 
 export interface SessionBridge {
   onFrame: (msg: FrameMessage) => void;
@@ -154,6 +155,11 @@ export interface SessionApi {
   /** Handshake is parked waiting for a password (PRD/10 §3.4). */
   credentialRequest: CredentialRequest | null;
   /**
+   * A Mac with someone else at its screen: the choice to make, or the wait
+   * for that person to accept. `null` otherwise and for every other server.
+   */
+  macSession: MacSessionPrompt | null;
+  /**
    * The last prompt answer in this window, without its password, so the next
    * prompt (a rejection asked again, or a Reconnect) starts from it. Kept
    * across `retryConnect` on purpose: that is the case it exists for.
@@ -222,6 +228,10 @@ export interface SessionApi {
   ) => void;
   /** Dismiss the credentials prompt and abandon the connection attempt. */
   dismissCredentialPrompt: () => void;
+  /** Answer the Mac's session choice: share the person's screen, or a separate session. */
+  chooseMacSession: (share: boolean) => void;
+  /** Dismiss the choice, or withdraw a request the person at the Mac has not answered. */
+  cancelMacSession: () => void;
   /**
    * Start the session again from scratch.
    *
@@ -362,6 +372,7 @@ export function useSession(
   const [certPrompt, setCertPrompt] = useState<CertPromptState | null>(null);
   const [sshHostKeyPrompt, setSshHostKeyPrompt] = useState<SshHostKeyPromptState | null>(null);
   const [credentialRequest, setCredentialRequest] = useState<CredentialRequest | null>(null);
+  const [macSession, setMacSession] = useState<MacSessionPrompt | null>(null);
   const [lastCredentialAnswer, setLastCredentialAnswer] = useState<PromptAnswer | null>(null);
   const [remoteClipboard, setRemoteClipboard] = useState<RemoteClipboard | null>(null);
   const [bellTick, setBellTick] = useState(0);
@@ -502,6 +513,7 @@ export function useSession(
           // handshake moved on (accepted, or given up on) it must not linger.
           if (next.state === "connected" || next.state === "disconnected") {
             setCredentialRequest(null);
+            setMacSession(null);
           }
           // A new connection starts with nothing said about input: the
           // computer says again if it still cannot take it.
@@ -563,6 +575,23 @@ export function useSession(
           // (attempt > 1) replaces the request in place so the dialog can
           // show the rejection reason without flickering.
           setCredentialRequest(ev.request);
+          break;
+        case "mac-session-choice":
+          setMacSession({
+            phase: "choose",
+            consoleUser: typeof ev.consoleUser === "string" ? ev.consoleUser : "",
+            canShare: ev.canShare !== false,
+            canSeparate: ev.canSeparate !== false,
+          });
+          break;
+        case "mac-session-waiting":
+          setMacSession({
+            phase: "waiting",
+            consoleUser: typeof ev.consoleUser === "string" ? ev.consoleUser : "",
+          });
+          break;
+        case "mac-session-granted":
+          setMacSession(null);
           break;
         case "stats":
           setStats(ev.stats);
@@ -1064,6 +1093,29 @@ export function useSession(
     });
   }, []);
 
+  const chooseMacSession = useCallback((share: boolean): void => {
+    // The waiting state, when there is one, comes back from the Mac's side as
+    // its own event; until then the overlay shows the connection going on.
+    setMacSession(null);
+    void safeInvoke("choose_mac_session", { sessionId: sid(), share }, null);
+  }, []);
+
+  const cancelMacSession = useCallback((): void => {
+    if (macSession?.phase === "waiting") {
+      // Closing the connection withdraws the request on the Mac.
+      void safeInvoke("disconnect_session", { sessionId: sid() }, null);
+      setState({
+        state: "disconnected",
+        reason: macShareWithdrawn(macSession.consoleUser),
+        can_retry: true,
+      });
+    } else {
+      void cancelCredentials(sid());
+      setState({ state: "disconnected", reason: "The connection was cancelled.", can_retry: true });
+    }
+    setMacSession(null);
+  }, [macSession]);
+
   const retryConnect = useCallback((options?: { reprompt?: boolean }): void => {
     repromptRef.current = options?.reprompt === true;
     // Clear anything left over from the attempt that failed, so the fresh
@@ -1071,6 +1123,7 @@ export function useSession(
     setCertPrompt(null);
     setSshHostKeyPrompt(null);
     setCredentialRequest(null);
+    setMacSession(null);
     setStats(null);
     setScreens([]);
     setSshAttached(null);
@@ -1080,12 +1133,12 @@ export function useSession(
   }, []);
 
   return {
-    state, desktopName, boundaryControl, boundaryClipboardWrite, boundaryRoute, boundaryInputTrouble, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, lastCredentialAnswer, remoteClipboard, bellTick,
+    state, desktopName, boundaryControl, boundaryClipboardWrite, boundaryRoute, boundaryInputTrouble, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, macSession, lastCredentialAnswer, remoteClipboard, bellTick,
     sshAttached, sshNotice,
     sendInput, sendTerminalInput, sendTerminalResize, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
     requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate, setAlwaysRefresh,
     dismissCertPrompt, acceptSshHostKey, dismissSshHostKeyPrompt,
-    submitCredentials, dismissCredentialPrompt, retryConnect,
+    submitCredentials, dismissCredentialPrompt, chooseMacSession, cancelMacSession, retryConnect,
   };
 }
 

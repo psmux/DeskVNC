@@ -114,6 +114,27 @@ describe("editing a saved Mac", () => {
     // Only the name goes back, and the Rust merge keeps the stored password.
     expect(vncCredentialPayload(d.vncUser, d.password, true)).toEqual({ vencryptUser: "alice" });
   });
+
+  it("asks each time by default and saves a chosen session for someone at the Mac", async () => {
+    const saved: HostDraft[] = [];
+    await open((d) => saved.push(d));
+    act(() => button("Advanced").click());
+    const label = [...document.querySelectorAll("label")].find((l) =>
+      l.textContent?.startsWith("When someone is using the Mac"),
+    );
+    const select = (label?.querySelector("select") ??
+      label?.parentElement?.querySelector("select")) as HTMLSelectElement | null;
+    if (!select) throw new Error("no Mac session field");
+    expect(select.value).toBe("ask");
+    act(() => {
+      select.value = "share";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => {
+      button("Save Changes").click();
+    });
+    expect(saved[0]?.macSession).toBe("share");
+  });
 });
 
 describe("a host imported from a .rdp file", () => {

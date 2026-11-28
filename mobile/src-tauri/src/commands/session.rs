@@ -337,7 +337,15 @@ fn options_for(protocol: Protocol, address: &str, port: u16) -> ConnectOptions {
         port
     };
     match protocol {
-        Protocol::Vnc => ConnectOptions::vnc(address, port),
+        Protocol::Vnc => {
+            let mut options = ConnectOptions::vnc(address, port);
+            // This app has no picker for a Mac's choice between the screen of
+            // the person at it and a session of one's own, so it keeps taking
+            // the separate session rather than waiting on a question it
+            // cannot show.
+            options.vnc_mut().mac_session = remote_core::MacSessionChoice::Separate;
+            options
+        }
         Protocol::Rdp => ConnectOptions::rdp(address, port),
         // The port rides along, as on the desktop: zero adds nothing.
         Protocol::Boundary => ConnectOptions {
