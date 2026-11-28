@@ -191,6 +191,7 @@ function useRdpResolutionDefault(): [RdpResolution, (v: RdpResolution) => void] 
 }
 
 export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
+  const t = useT();
   const [tab, setTab] = useState<Tab>("General");
   const { settings, update } = useSettings();
   // The same toggle as the Library header, one source of truth, and flipping
@@ -235,6 +236,25 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   // and the live line the toggle below is about.
   const { plane } = useAgentActivity();
   const tabs = tabsFor(plane.on);
+  // The tab names are compared in code, so they stay English and are only
+  // translated where they are drawn.
+  const tabLabel: Record<Tab, string> = {
+    General: t("General"),
+    Appearance: t("Appearance"),
+    Connections: t("Connections"),
+    Session: t("Session"),
+    Input: t("Input"),
+    Clipboard: t("Clipboard"),
+    Files: t("Files"),
+    Security: t("Security"),
+    Network: t("Network"),
+    Agents: t("Agents"),
+  };
+  const themeLabel: Record<ThemeChoice, string> = {
+    system: t("Follow System"),
+    light: t("Light"),
+    dark: t("Dark"),
+  };
 
   useEffect(() => {
     const read = (): void => void credentialStatus().then(setCredStatus);
@@ -271,29 +291,29 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Preferences"
+        aria-label={t("Preferences")}
         className="flex h-[560px] w-[760px] max-w-[calc(100vw-32px)] overflow-hidden rounded-lg border border-subtle bg-surface shadow-(--shadow-pop)"
       >
-        <nav className="w-44 shrink-0 space-y-0.5 border-r border-subtle bg-inset/40 p-2.5" aria-label="Preference sections">
-          {tabs.map((t) => (
+        <nav className="w-44 shrink-0 space-y-0.5 border-r border-subtle bg-inset/40 p-2.5" aria-label={t("Preference sections")}>
+          {tabs.map((name) => (
             <button
-              key={t}
+              key={name}
               type="button"
-              aria-current={tab === t ? "true" : undefined}
+              aria-current={tab === name ? "true" : undefined}
               className={classNames(
                 "block w-full rounded-sm px-2.5 py-1.5 text-left text-sm",
-                tab === t ? "bg-accent/15 font-medium text-primary" : "text-secondary hover:bg-inset",
+                tab === name ? "bg-accent/15 font-medium text-primary" : "text-secondary hover:bg-inset",
               )}
-              onClick={() => setTab(t)}
+              onClick={() => setTab(name)}
             >
-              {t}
+              {tabLabel[name]}
             </button>
           ))}
         </nav>
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center justify-between border-b border-subtle px-5 py-3">
-            <h2 className="text-base font-semibold text-primary">{tab}</h2>
-            <button type="button" aria-label="Close preferences" className="rounded-sm p-1 text-tertiary hover:text-primary" onClick={onClose}>
+            <h2 className="text-base font-semibold text-primary">{tabLabel[tab]}</h2>
+            <button type="button" aria-label={t("Close preferences")} className="rounded-sm p-1 text-tertiary hover:text-primary" onClick={onClose}>
               <IconX size={16} />
             </button>
           </div>
@@ -302,32 +322,32 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
               <>
                 <LanguageSetting />
                 <Toggle
-                  label="Confirm before disconnecting"
-                  description="Ask before ending a session from the toolbar"
+                  label={t("Confirm before disconnecting")}
+                  description={t("Ask before ending a session from the toolbar")}
                   value={confirmDisconnect}
                   onChange={setConfirmDisconnect}
                 />
                 <Toggle
-                  label="Capture thumbnails"
-                  description="Save a small screenshot of each host after connecting, for the library grid"
+                  label={t("Capture thumbnails")}
+                  description={t("Save a small screenshot of each host after connecting, for the library grid")}
                   value={captureThumbs}
                   onChange={setCaptureThumbs}
                 />
                 <Toggle
-                  label="Live previews"
-                  description="While a session is connected, its library tile shows a live picture (about 2 frames per second) instead of the saved thumbnail"
+                  label={t("Live previews")}
+                  description={t("While a session is connected, its library tile shows a live picture (about 2 frames per second) instead of the saved thumbnail")}
                   value={livePreviews}
                   onChange={setLivePreviews}
                 />
                 <Toggle
-                  label="Save computers I connect to"
-                  description="Add a computer to your Library once a quick connect, a recent or a nearby computer connects. Passwords are only kept when you tick Remember for this computer."
+                  label={t("Save computers I connect to")}
+                  description={t("Add a computer to your Library once a quick connect, a recent or a nearby computer connects. Passwords are only kept when you tick Remember for this computer.")}
                   value={settings.autoSaveHosts}
                   onChange={(v) => update({ autoSaveHosts: v })}
                 />
                 <Toggle
-                  label="Compact library density"
-                  description="Smaller tiles and tighter spacing for large libraries"
+                  label={t("Compact library density")}
+                  description={t("Smaller tiles and tighter spacing for large libraries")}
                   value={settings.compact}
                   onChange={(v) => update({ compact: v })}
                 />
@@ -336,24 +356,24 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
             {tab === "Appearance" ? (
               <>
                 <div>
-                  <p className="text-sm font-medium text-primary">Theme</p>
-                  <p className="mb-2 text-xs text-tertiary">Follow System switches automatically with your OS</p>
-                  <div className="flex gap-2" role="radiogroup" aria-label="Theme">
-                    {(["system", "light", "dark"] as ThemeChoice[]).map((t) => (
+                  <p className="text-sm font-medium text-primary">{t("Theme")}</p>
+                  <p className="mb-2 text-xs text-tertiary">{t("Follow System switches automatically with your OS")}</p>
+                  <div className="flex gap-2" role="radiogroup" aria-label={t("Theme")}>
+                    {(["system", "light", "dark"] as ThemeChoice[]).map((choice) => (
                       <button
-                        key={t}
+                        key={choice}
                         type="button"
                         role="radio"
-                        aria-checked={settings.theme === t}
+                        aria-checked={settings.theme === choice}
                         className={classNames(
-                          "rounded-md border px-4 py-2 text-sm capitalize",
-                          settings.theme === t
+                          "rounded-md border px-4 py-2 text-sm",
+                          settings.theme === choice
                             ? "border-accent bg-accent/10 font-medium text-primary"
                             : "border-subtle text-secondary hover:border-strong",
                         )}
-                        onClick={() => update({ theme: t })}
+                        onClick={() => update({ theme: choice })}
                       >
-                        {t === "system" ? "Follow System" : t}
+                        {themeLabel[choice]}
                       </button>
                     ))}
                   </div>
@@ -363,28 +383,28 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
             {tab === "Connections" ? (
               <>
                 <Toggle
-                  label="Show sessions as tabs in one window"
-                  description="Connected computers become tabs across the top of this window, switched between like browser tabs, instead of each opening a window of its own. Sessions already running stay where they are; this decides where the next one goes."
+                  label={t("Show sessions as tabs in one window")}
+                  description={t("Connected computers become tabs across the top of this window, switched between like browser tabs, instead of each opening a window of its own. Sessions already running stay where they are; this decides where the next one goes.")}
                   value={settings.windowMode === "tabs"}
                   onChange={(v) => update({ windowMode: v ? "tabs" : "windows" })}
                 />
                 <Toggle
                   label={
                     settings.windowMode === "tabs"
-                      ? "Allow more than one tab per computer"
-                      : "Allow more than one window per computer"
+                      ? t("Allow more than one tab per computer")
+                      : t("Allow more than one window per computer")
                   }
                   description={
                     settings.windowMode === "tabs"
-                      ? "Normally, connecting to a computer you're already connected to selects the tab it is in instead of starting a second session. Turn this on to open a separate tab every time."
-                      : "Normally, connecting to a computer you're already connected to brings that window back to the front instead of starting a second session. Turn this on to open a separate window every time."
+                      ? t("Normally, connecting to a computer you're already connected to selects the tab it is in instead of starting a second session. Turn this on to open a separate tab every time.")
+                      : t("Normally, connecting to a computer you're already connected to brings that window back to the front instead of starting a second session. Turn this on to open a separate window every time.")
                   }
                   value={multipleSessions}
                   onChange={setMultipleSessions}
                 />
                 <Toggle
-                  label="Sharpen the picture when motion stops"
-                  description="During movement the image is compressed hard so it stays instant; a moment after things settle, the affected area is repainted at full quality. Turn this off on a metered connection to keep the saved bandwidth."
+                  label={t("Sharpen the picture when motion stops")}
+                  description={t("During movement the image is compressed hard so it stays instant; a moment after things settle, the affected area is repainted at full quality. Turn this off on a metered connection to keep the saved bandwidth.")}
                   value={losslessRefresh}
                   onChange={setLosslessRefresh}
                 />
@@ -395,10 +415,10 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   are per host, off by default, and a global switch would let
                   one bad server quietly lower the bar for every other one.
                 */}
-                <SectionHeading>Remote Desktop defaults</SectionHeading>
+                <SectionHeading>{t("Remote Desktop defaults")}</SectionHeading>
                 <Toggle
-                  label="Use all my monitors for new Remote Desktop connections"
-                  description="New hosts start with every local monitor attached. Existing hosts keep whatever you set on them."
+                  label={t("Use all my monitors for new Remote Desktop connections")}
+                  description={t("New hosts start with every local monitor attached. Existing hosts keep whatever you set on them.")}
                   value={rdpMultiMonitor}
                   onChange={(on) => {
                     setRdpDefault("monitors", on ? "all" : "primary");
@@ -406,11 +426,9 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   }}
                 />
                 <label className="block">
-                  <span className="text-sm text-primary">Resolution for new Remote Desktop hosts</span>
+                  <span className="text-sm text-primary">{t("Resolution for new Remote Desktop hosts")}</span>
                   <span className="mt-0.5 block text-xs text-tertiary">
-                    Keeping it matched is what Windows App does on a Mac: the remote desktop
-                    resizes with this window. Matching only when connecting leaves it alone
-                    afterwards, so that machine's icons stay where they are.
+                    {t("Keeping it matched is what Windows App does on a Mac: the remote desktop resizes with this window. Matching only when connecting leaves it alone afterwards, so that machine's icons stay where they are.")}
                   </span>
                   <select
                     className="field mt-1.5"
@@ -420,8 +438,8 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                       if (next) setRdpResolution(next);
                     }}
                   >
-                    <option value="window-at-connect">Match the window when connecting</option>
-                    <option value="follow-window">Match the window, and keep matching</option>
+                    <option value="window-at-connect">{t("Match the window when connecting")}</option>
+                    <option value="follow-window">{t("Match the window, and keep matching")}</option>
                     {RDP_FIXED_SIZES.map(([w, h]) => (
                       <option key={`${w}x${h}`} value={`${w}x${h}`}>
                         {w} x {h}
@@ -430,8 +448,8 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   </select>
                 </label>
                 <Toggle
-                  label="Play remote sound on this computer"
-                  description="Sound from the remote computer is redirected here rather than left playing there."
+                  label={t("Play remote sound on this computer")}
+                  description={t("Sound from the remote computer is redirected here rather than left playing there.")}
                   value={rdpAudio}
                   onChange={(on) => {
                     setRdpDefault("audio", on ? "play-locally" : "leave-at-server");
@@ -439,8 +457,8 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   }}
                 />
                 <Toggle
-                  label="Share my clipboard with Remote Desktop connections"
-                  description="Copy and paste text in both directions."
+                  label={t("Share my clipboard with Remote Desktop connections")}
+                  description={t("Copy and paste text in both directions.")}
                   value={rdpClipboard}
                   onChange={(on) => {
                     setRdpDefault("clipboard", on);
@@ -448,14 +466,14 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   }}
                 />
                 <Toggle
-                  label="Reconnect until I close the window"
-                  description="Keep retrying dropped sessions with exponential backoff"
+                  label={t("Reconnect until I close the window")}
+                  description={t("Keep retrying dropped sessions with exponential backoff")}
                   value={reconnectForever}
                   onChange={setReconnectForever}
                 />
                 <Toggle
-                  label="Send Wake-on-LAN during retries"
-                  description="If a host with a saved MAC address looks down, send a magic packet while reconnecting"
+                  label={t("Send Wake-on-LAN during retries")}
+                  description={t("If a host with a saved MAC address looks down, send a magic packet while reconnecting")}
                   value={wolDuringRetry}
                   onChange={setWolDuringRetry}
                 />
@@ -464,66 +482,64 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
             {tab === "Session" ? (
               <>
                 <Toggle
-                  label="Hide the floating toolbar"
-                  description="Leave nothing on top of the remote desktop. Everything the toolbar does stays available from the View and Session menus, which show what each session is set to."
+                  label={t("Hide the floating toolbar")}
+                  description={t("Leave nothing on top of the remote desktop. Everything the toolbar does stays available from the View and Session menus, which show what each session is set to.")}
                   value={hideToolbar}
                   onChange={setHideToolbar}
                 />
                 <Toggle
-                  label="Lock zoom"
-                  description="Ignore pinch-to-zoom, which is easy to trigger by accident mid-scroll on a trackpad. The zoom controls still work."
+                  label={t("Lock zoom")}
+                  description={t("Ignore pinch-to-zoom, which is easy to trigger by accident mid-scroll on a trackpad. The zoom controls still work.")}
                   value={zoomLocked}
                   onChange={setZoomLocked}
                 />
                 <Toggle
-                  label="Pan by moving to the edges"
-                  description="Scroll the view when the pointer reaches an edge, for a desktop larger than the window. With this off, the part of the screen past the edge can only be reached by space-dragging."
+                  label={t("Pan by moving to the edges")}
+                  description={t("Scroll the view when the pointer reaches an edge, for a desktop larger than the window. With this off, the part of the screen past the edge can only be reached by space-dragging.")}
                   value={edgePan}
                   onChange={setEdgePan}
                 />
 
                 <div className="border-t border-subtle pt-5">
-                  <p className="text-sm font-medium text-primary">Defaults for new computers</p>
+                  <p className="text-sm font-medium text-primary">{t("Defaults for new computers")}</p>
                   <p className="mt-0.5 text-xs text-tertiary">
-                    Where a computer starts before you have adjusted anything on it. Change one of
-                    these while connected, from the toolbar or the menus, and it is remembered
-                    against that computer from then on, including which monitor you picked.
+                    {t("Where a computer starts before you have adjusted anything on it. Change one of these while connected, from the toolbar or the menus, and it is remembered against that computer from then on, including which monitor you picked.")}
                   </p>
                 </div>
 
                 <Choice
-                  label="Scaling"
-                  description="How the remote desktop is fitted into the window"
+                  label={t("Scaling")}
+                  description={t("How the remote desktop is fitted into the window")}
                   value={viewDefaults.scalingMode}
                   options={
                     [
-                      ["aspect-fit", "Aspect fit"],
-                      ["fit", "Fit"],
+                      ["aspect-fit", t("Aspect fit")],
+                      ["fit", t("Fit")],
                       ["actual", "1:1"],
-                      ["remote-resize", "Remote"],
+                      ["remote-resize", t("Remote")],
                     ] as [ScalingMode, string][]
                   }
                   onChange={(scalingMode) => setViewDefaults({ scalingMode })}
                 />
                 <Choice
-                  label="Quality"
-                  description="Auto infers the link from throughput; the others say what the link is and stop it adapting"
+                  label={t("Quality")}
+                  description={t("Auto infers the link from throughput; the others say what the link is and stop it adapting")}
                   value={viewDefaults.quality}
                   options={
                     [
-                      ["auto", "Auto"],
-                      ["high", "High"],
-                      ["medium", "Medium"],
-                      ["low", "Low"],
-                      ["bw", "B&W"],
+                      ["auto", t("Auto")],
+                      ["high", t("High")],
+                      ["medium", t("Medium")],
+                      ["low", t("Low")],
+                      ["bw", t("B&W")],
                     ] as [QualityPreset, string][]
                   }
                   onChange={(quality) => setViewDefaults({ quality })}
                 />
                 {viewDefaults.quality === "bw" ? (
                   <Choice
-                    label="Gray levels"
-                    description="How many shades the black-and-white preset keeps"
+                    label={t("Gray levels")}
+                    description={t("How many shades the black-and-white preset keeps")}
                     value={String(viewDefaults.bwLevels)}
                     options={[
                       ["256", "256"],
@@ -531,26 +547,26 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                       ["8", "8"],
                       ["4", "4"],
                       ["2", "2"],
-                      ["1", "1-bit"],
+                      ["1", t("1-bit")],
                     ]}
                     onChange={(v) => setViewDefaults({ bwLevels: Number(v) })}
                   />
                 ) : null}
                 <Toggle
-                  label="Start in view only"
-                  description="Watch without sending any input. Nothing you type or click reaches the remote computer until you turn it off."
+                  label={t("Start in view only")}
+                  description={t("Watch without sending any input. Nothing you type or click reaches the remote computer until you turn it off.")}
                   value={viewDefaults.viewOnly}
                   onChange={(viewOnly) => setViewDefaults({ viewOnly })}
                 />
                 <Toggle
-                  label="Always request fresh frames"
-                  description="Re-fetch the whole screen every second instead of trusting the server to report what changed. Fixes a picture that stays stale or smeared; uses more bandwidth."
+                  label={t("Always request fresh frames")}
+                  description={t("Re-fetch the whole screen every second instead of trusting the server to report what changed. Fixes a picture that stays stale or smeared; uses more bandwidth.")}
                   value={viewDefaults.alwaysRefresh}
                   onChange={(alwaysRefresh) => setViewDefaults({ alwaysRefresh })}
                 />
                 <Toggle
-                  label="Pass system shortcuts to the remote"
-                  description="Send Cmd/Alt+Tab, Cmd+Space and the Windows key to the remote computer instead of this one. Needs Accessibility permission on macOS, and grabs your keyboard while a session is focused; release it at any time with Ctrl+Alt+Shift+Esc."
+                  label={t("Pass system shortcuts to the remote")}
+                  description={t("Send Cmd/Alt+Tab, Cmd+Space and the Windows key to the remote computer instead of this one. Needs Accessibility permission on macOS, and grabs your keyboard while a session is focused; release it at any time with Ctrl+Alt+Shift+Esc.")}
                   value={viewDefaults.passthrough}
                   onChange={(passthrough) => setViewDefaults({ passthrough })}
                 />
@@ -559,44 +575,44 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
             {tab === "Input" ? (
               <>
                 <Toggle
-                  label="Match my scroll direction"
-                  description="Scroll the remote desktop the way this computer scrolls, whatever your trackpad and mouse settings say. Turn it off to reverse the direction on the remote only."
+                  label={t("Match my scroll direction")}
+                  description={t("Scroll the remote desktop the way this computer scrolls, whatever your trackpad and mouse settings say. Turn it off to reverse the direction on the remote only.")}
                   value={naturalScroll}
                   onChange={setNaturalScroll}
                 />
                 <Toggle
-                  label="Match my local keyboard layout"
-                  description="Keys type what they type on this keyboard, instead of what the remote machine's layout assigns to the same physical key. Only matters when the two layouts differ."
+                  label={t("Match my local keyboard layout")}
+                  description={t("Keys type what they type on this keyboard, instead of what the remote machine's layout assigns to the same physical key. Only matters when the two layouts differ.")}
                   value={matchLocalLayout}
                   onChange={setMatchLocalLayout}
                 />
                 <Toggle
-                  label="Type text inserted by dictation tools"
-                  description="Text that dictation and automation software inserts without pressing keys is typed into the remote desktop. Accents and CJK input methods work either way, those are you typing."
+                  label={t("Type text inserted by dictation tools")}
+                  description={t("Text that dictation and automation software inserts without pressing keys is typed into the remote desktop. Accents and CJK input methods work either way, those are you typing.")}
                   value={forwardInsertedText}
                   onChange={setForwardInsertedText}
                 />
                 <Toggle
-                  label="Type a paste that stays on this Mac into the remote"
-                  description="When Cmd+V is left to macOS (system shortcuts not passed through) or you pick Edit ▸ Paste, the clipboard text is typed into the remote desktop key by key. Dictation tools that paste, such as Wispr Flow, need this on."
+                  label={t("Type a paste that stays on this Mac into the remote")}
+                  description={t("When Cmd+V is left to macOS (system shortcuts not passed through) or you pick Edit ▸ Paste, the clipboard text is typed into the remote desktop key by key. Dictation tools that paste, such as Wispr Flow, need this on.")}
                   value={typeLocalPaste}
                   onChange={setTypeLocalPaste}
                 />
                 <Toggle
-                  label="Show the remote pointer"
-                  description="Draw the remote machine's own mouse cursor. Turn this off if two pointers feel distracting, your input is sent either way."
+                  label={t("Show the remote pointer")}
+                  description={t("Draw the remote machine's own mouse cursor. Turn this off if two pointers feel distracting, your input is sent either way.")}
                   value={settings.showRemoteCursor}
                   onChange={(v) => update({ showRemoteCursor: v })}
                 />
                 <Choice
-                  label="My pointer"
-                  description="The system arrow covers the pixels under its own tip, which is where the remote pointer sits, so with both drawn they crowd each other. Dot is a ring centred on the hotspot; Hidden leaves only the remote pointer."
+                  label={t("My pointer")}
+                  description={t("The system arrow covers the pixels under its own tip, which is where the remote pointer sits, so with both drawn they crowd each other. Dot is a ring centred on the hotspot; Hidden leaves only the remote pointer.")}
                   value={settings.localCursor}
                   options={
                     [
-                      ["standard", "Standard arrow"],
-                      ["dot", "Dot"],
-                      ["off", "Hidden"],
+                      ["standard", t("Standard arrow")],
+                      ["dot", t("Dot")],
+                      ["off", t("Hidden")],
                     ] as [LocalCursor, string][]
                   }
                   onChange={(localCursor) => update({ localCursor })}
@@ -606,20 +622,20 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
             {tab === "Clipboard" ? (
               <>
                 <Toggle
-                  label="Sync clipboard automatically"
-                  description="Text copied on either side is available on the other"
+                  label={t("Sync clipboard automatically")}
+                  description={t("Text copied on either side is available on the other")}
                   value={clipboardAuto}
                   onChange={setClipboardAuto}
                 />
                 <Toggle
-                  label="Push clipboard when the window gains focus"
-                  description="Send your local clipboard to the remote when you switch back to the session. Never when helping someone: there it goes over only when you paste or press Send clipboard"
+                  label={t("Push clipboard when the window gains focus")}
+                  description={t("Send your local clipboard to the remote when you switch back to the session. Never when helping someone: there it goes over only when you paste or press Send clipboard")}
                   value={clipboardOnFocus}
                   onChange={setClipboardOnFocus}
                 />
                 <Toggle
-                  label="Push clipboard when pasting into the remote"
-                  description="Cmd/Ctrl+V sends your local clipboard first, so the remote pastes what you copied most recently"
+                  label={t("Push clipboard when pasting into the remote")}
+                  description={t("Cmd/Ctrl+V sends your local clipboard first, so the remote pastes what you copied most recently")}
                   value={clipboardOnPaste}
                   onChange={setClipboardOnPaste}
                 />
@@ -628,8 +644,8 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
             {tab === "Files" ? (
               <>
                 <Toggle
-                  label="Confirm before overwriting files"
-                  description="Ask when a transfer would replace an existing file"
+                  label={t("Confirm before overwriting files")}
+                  description={t("Ask when a transfer would replace an existing file")}
                   value={confirmFileOverwrite}
                   onChange={setConfirmFileOverwrite}
                 />
@@ -638,7 +654,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
             {tab === "Security" ? (
               <>
                 <div>
-                  <p className="text-sm font-medium text-primary">Credential storage</p>
+                  <p className="text-sm font-medium text-primary">{t("Credential storage")}</p>
                   <p className="text-xs text-tertiary" data-testid="credential-store-line">
                     {describeCredentialStore(credStatus)}
                   </p>
@@ -648,13 +664,13 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                       className="btn-secondary mt-2"
                       onClick={() => window.dispatchEvent(new Event(OPEN_CREDENTIAL_UNLOCK))}
                     >
-                      {credStatus.vaultExists ? "Unlock saved passwords" : "Choose a master password"}
+                      {credStatus.vaultExists ? t("Unlock saved passwords") : t("Choose a master password")}
                     </button>
                   ) : null}
                 </div>
                 <Toggle
-                  label="Strict certificate pinning"
-                  description="Refuse to connect when a server's certificate changes, until you explicitly re-trust it"
+                  label={t("Strict certificate pinning")}
+                  description={t("Refuse to connect when a server's certificate changes, until you explicitly re-trust it")}
                   value={strictTofu}
                   onChange={setStrictTofu}
                 />
@@ -663,34 +679,34 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
             {tab === "Network" ? (
               <>
                 <Toggle
-                  label="Look up names from other services"
-                  description="Some Windows machines block every name service. Reading the name they publish on RDP or RPC names them anyway, but it means connecting briefly to ports you are not connecting through, which strict network monitoring may flag. Turn off to use name services only."
+                  label={t("Look up names from other services")}
+                  description={t("Some Windows machines block every name service. Reading the name they publish on RDP or RPC names them anyway, but it means connecting briefly to ports you are not connecting through, which strict network monitoring may flag. Turn off to use name services only.")}
                   value={deepNames}
                   onChange={setDeepNames}
                 />
                 <Toggle
-                  label="Look for Remote Desktop while scanning"
-                  description="Also tries port 3389 on each address, so a Windows machine that runs no VNC server still appears. One extra connection per address, at the same polite rate as the rest of the scan."
+                  label={t("Look for Remote Desktop while scanning")}
+                  description={t("Also tries port 3389 on each address, so a Windows machine that runs no VNC server still appears. One extra connection per address, at the same polite rate as the rest of the scan.")}
                   value={probeRdp}
                   onChange={setProbeRdp}
                 />
                 <Toggle
-                  label="Discover computers automatically (mDNS/Bonjour)"
+                  label={t("Discover computers automatically (mDNS/Bonjour)")}
                   // Unchanged, and deliberately: mDNS discovery really is VNC
                   // only. There is no Bonjour service for Remote Desktop.
-                  description="Listen for VNC servers advertising themselves on your local network"
+                  description={t("Listen for VNC servers advertising themselves on your local network")}
                   value={mdnsEnabled}
                   onChange={setMdnsEnabled}
                 />
                 <Toggle
-                  label="Never use relays"
-                  description="Boundary connects only straight to the other computer, on your network or VPN, and never through a relay or the address directory. A computer saved only by its ID needs one direct connection by address first. Support invitations you share also stop offering a relay."
+                  label={t("Never use relays")}
+                  description={t("Boundary connects only straight to the other computer, on your network or VPN, and never through a relay or the address directory. A computer saved only by its ID needs one direct connection by address first. Support invitations you share also stop offering a relay.")}
                   value={neverRelay}
                   onChange={setNeverRelay}
                 />
                 <Toggle
-                  label="Probe saved hosts for online status"
-                  description="A lightweight, throttled TCP check that powers the green dot on tiles"
+                  label={t("Probe saved hosts for online status")}
+                  description={t("A lightweight, throttled TCP check that powers the green dot on tiles")}
                   value={settings.probeOnline}
                   onChange={(v) => update({ probeOnline: v })}
                 />
@@ -699,8 +715,8 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
             {tab === "Agents" && plane.on ? (
               <>
                 <Toggle
-                  label="Hide the agent counts"
-                  description="Take the line reading how many agents are connected, and how much of this computer they are driving, off the activity strip. The strip itself stays while agents are turned on, with each machine an agent drives on it, and this switch stays here."
+                  label={t("Hide the agent counts")}
+                  description={t("Take the line reading how many agents are connected, and how much of this computer they are driving, off the activity strip. The strip itself stays while agents are turned on, with each machine an agent drives on it, and this switch stays here.")}
                   value={hideAgentStatus}
                   onChange={setHideAgentStatus}
                 />
@@ -709,13 +725,13 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   the opt in and anyone who already chose stays where they were.
                 */}
                 <Toggle
-                  label="Show a card for each machine an agent drives"
-                  description="The activity strip grows taller to hold the cards, and stays that height whether or not an agent is driving, so a remote desktop set to resize to fit is never resized under an agent. Off, each machine is a small chip on the strip's one line."
+                  label={t("Show a card for each machine an agent drives")}
+                  description={t("The activity strip grows taller to hold the cards, and stays that height whether or not an agent is driving, so a remote desktop set to resize to fit is never resized under an agent. Off, each machine is a small chip on the strip's one line.")}
                   value={!compactAgentRow}
                   onChange={(v) => setCompactAgentRow(!v)}
                 />
                 <div className="border-t border-subtle pt-5">
-                  <p className="text-sm font-medium text-primary">Right now</p>
+                  <p className="text-sm font-medium text-primary">{t("Right now")}</p>
                   {/*
                     The same sentence the strip draws, from the same function.
                     A person deciding whether to hide something should be able
@@ -723,14 +739,11 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   */}
                   <p className="mono mt-0.5 text-xs text-secondary">{planeStatusLine(plane)}</p>
                   <p className="mt-1.5 text-xs text-tertiary">
-                    Driving means an agent holds the lease on that machine. An agent that is
-                    connected but holds nothing is driving nothing, and is counted only in the
-                    first number.
+                    {t("Driving means an agent holds the lease on that machine. An agent that is connected but holds nothing is driving nothing, and is counted only in the first number.")}
                   </p>
                 </div>
                 <p className="text-xs text-tertiary">
-                  AI Agents, in the library sidebar, has the lines to paste, the check to run,
-                  and the switch that turns all of this off again.
+                  {t("AI Agents, in the library sidebar, has the lines to paste, the check to run, and the switch that turns all of this off again.")}
                 </p>
               </>
             ) : null}

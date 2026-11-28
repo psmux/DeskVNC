@@ -43,6 +43,7 @@ import {
   type SessionCredentialState,
 } from "../lib/saveTabHost";
 import { Dialog } from "./primitives";
+import { useT } from "../i18n";
 
 export function SaveTabHostDialog({
   session,
@@ -57,6 +58,7 @@ export function SaveTabHostDialog({
   host: HostProfile | null;
   onClose: () => void;
 }): ReactNode {
+  const t = useT();
   const { hosts, saveHost, refresh } = useHosts();
   const { discovered } = useDiscovery();
   const { bindHost, select } = useTabs();
@@ -108,7 +110,7 @@ export function SaveTabHostDialog({
         );
       }
       if (!saved) {
-        setError("This host could not be saved.");
+        setError(t("This host could not be saved."));
         return;
       }
       if (inTauri()) {
@@ -126,8 +128,8 @@ export function SaveTabHostDialog({
       push(
         "success",
         existing
-          ? `Updated ${saved.friendlyName} in your saved hosts`
-          : `Saved ${saved.friendlyName} to your saved hosts`,
+          ? t("Updated {name} in your saved hosts", { name: saved.friendlyName })
+          : t("Saved {name} to your saved hosts", { name: saved.friendlyName }),
       );
       onClose();
     } catch (err: unknown) {
@@ -154,10 +156,10 @@ export function SaveTabHostDialog({
   };
 
   return (
-    <Dialog title={editing ? "Edit saved host" : "Add to saved hosts"} onClose={onClose} width={440}>
+    <Dialog title={editing ? t("Edit saved host") : t("Add to saved hosts")} onClose={onClose} width={440}>
       <form className="space-y-4" onSubmit={onSubmit}>
         <label className="block">
-          <span className="mb-1 block text-xs font-medium text-secondary">Name</span>
+          <span className="mb-1 block text-xs font-medium text-secondary">{t("Name")}</span>
           <input
             data-autofocus
             className="field"
@@ -169,18 +171,22 @@ export function SaveTabHostDialog({
           />
         </label>
         <p className="text-xs text-secondary">
-          {protocolLabel(params.protocol)} at {address}, port {params.port}
+          {t("{protocol} at {address}, port {port}", {
+            protocol: protocolLabel(params.protocol),
+            address,
+            port: String(params.port),
+          })}
         </p>
 
         {editing ? (
           <p className="text-xs text-secondary">
-            This tab is a host in your Library. Change its name here, or open it for every setting.
+            {t("This tab is a host in your Library. Change its name here, or open it for every setting.")}
           </p>
         ) : existing ? (
           <div className="rounded-md bg-inset p-3 text-sm text-primary" role="status">
-            {existing.friendlyName} is already saved for this address and port.
+            {t("{name} is already saved for this address and port.", { name: existing.friendlyName })}
             <span className="mt-0.5 block text-xs text-secondary">
-              Open it to see its settings, or update it to use this name and keep this tab with it.
+              {t("Open it to see its settings, or update it to use this name and keep this tab with it.")}
             </span>
           </div>
         ) : null}
@@ -196,7 +202,7 @@ export function SaveTabHostDialog({
             <span>
               {credentialsLabel(creds)}
               <span className="block text-xs text-tertiary">
-                Stored with your other saved passwords, never in the host list.
+                {t("Stored with your other saved passwords, never in the host list.")}
               </span>
             </span>
           </label>
@@ -210,32 +216,32 @@ export function SaveTabHostDialog({
 
         <div className="flex justify-end gap-2 pt-1">
           <button type="button" className="btn-secondary" onClick={onClose}>
-            Cancel
+            {t("Cancel")}
           </button>
           {editing ? (
             <>
               <button type="button" className="btn-secondary" onClick={openExisting}>
-                All settings
+                {t("All settings")}
               </button>
               <button
                 type="submit"
                 className="btn-primary disabled:opacity-40"
                 disabled={busy || name.trim() === ""}
               >
-                Save
+                {t("Save")}
               </button>
             </>
           ) : existing ? (
             <>
               <button type="button" className="btn-secondary" onClick={openExisting}>
-                Open saved host
+                {t("Open saved host")}
               </button>
               <button
                 type="submit"
                 className="btn-primary disabled:opacity-40"
                 disabled={busy || name.trim() === ""}
               >
-                Update saved host
+                {t("Update saved host")}
               </button>
             </>
           ) : (
@@ -244,7 +250,7 @@ export function SaveTabHostDialog({
               className="btn-primary disabled:opacity-40"
               disabled={busy || name.trim() === ""}
             >
-              Save
+              {t("Save")}
             </button>
           )}
         </div>

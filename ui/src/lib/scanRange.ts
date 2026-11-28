@@ -6,6 +6,7 @@
  * person is still typing.
  */
 import type { RangeVerdict, ScanNetwork, ScanNetworkKind } from "./types";
+import { t, tn } from "../i18n";
 
 /** A /22, 1,022 hosts: larger than this asks first. */
 export const CONFIRM_ABOVE_PREFIX = 22;
@@ -37,13 +38,13 @@ function mask(prefix: number): number {
 
 /** `a.b.c.d/nn`, or a bare `a.b.c.d` for that one address. */
 export function parseCidr(text: string): Cidr | null {
-  const t = text.trim();
-  const slash = t.indexOf("/");
-  const addr = parseIpv4(slash < 0 ? t : t.slice(0, slash).trim());
+  const typed = text.trim();
+  const slash = typed.indexOf("/");
+  const addr = parseIpv4(slash < 0 ? typed : typed.slice(0, slash).trim());
   if (addr === null) return null;
   let prefix = 32;
   if (slash >= 0) {
-    const p = t.slice(slash + 1).trim();
+    const p = typed.slice(slash + 1).trim();
     if (!/^\d{1,2}$/.test(p)) return null;
     prefix = Number(p);
     if (prefix > 32) return null;
@@ -107,7 +108,7 @@ export function judgeCidrs(cidrs: string[]): { verdict: RangeVerdict; addresses:
 
 /** "1 address", "254 addresses", "65,534 addresses". */
 export function formatAddresses(n: number): string {
-  return `${n.toLocaleString("en-US")} ${n === 1 ? "address" : "addresses"}`;
+  return tn(n, "{count} address", "{count} addresses");
 }
 
 /**
@@ -119,19 +120,26 @@ export function formatAddresses(n: number): string {
  */
 export function roughDuration(addresses: number): string {
   const seconds = Math.ceil((addresses * 3) / 400);
-  if (seconds < 90) return "about a minute";
-  return `about ${Math.round(seconds / 60)} minutes`;
+  if (seconds < 90) return t("about a minute");
+  return t("about {count} minutes", { count: Math.round(seconds / 60) });
 }
 
 /** Why a typed range cannot be scanned, or null when it can. */
 export function rangeProblem(text: string): string | null {
   const c = parseCidr(text);
-  if (!c) return "Type an address or a range, for example 192.168.1.0/24.";
+  if (!c) return t("Type an address or a range, for example {example}.", { example: "192.168.1.0/24" });
   switch (judgeRange(c)) {
     case "public":
-      return `${formatCidr(c)} is not a private range. Only 10.x, 172.16 to 172.31, 192.168.x and 100.64/10 can be scanned.`;
+      return t(
+        "{range} is not a private range. Only 10.x, 172.16 to 172.31, 192.168.x and 100.64/10 can be scanned.",
+        { range: formatCidr(c) },
+      );
     case "too-large":
-      return `${formatCidr(c)} has ${formatAddresses(hostCount(c))}, more than a /${LARGEST_PREFIX}. Scan a smaller part of it.`;
+      return t("{range} has {addresses}, more than a /{prefix}. Scan a smaller part of it.", {
+        range: formatCidr(c),
+        addresses: formatAddresses(hostCount(c)),
+        prefix: String(LARGEST_PREFIX),
+      });
     default:
       return null;
   }
@@ -144,6 +152,13 @@ export const KIND_LABEL: Record<ScanNetworkKind, string> = {
   routed: "Routed",
   virtual: "Virtual",
 };
+
+/** `KIND_LABEL` in the language in use. LAN, VPN and WARP stay as they are. */
+export function kindLabel(kind: ScanNetworkKind): string {
+  if (kind === "routed") return t("Routed");
+  if (kind === "virtual") return t("Virtual");
+  return KIND_LABEL[kind];
+}
 
 // ------------------------------------------------------------- last pick
 

@@ -31,6 +31,7 @@
  */
 
 import { DEFAULT_PORT, type ProtocolKind } from "./types";
+import { t } from "../i18n";
 
 export const DEFAULT_VNC_PORT = DEFAULT_PORT.vnc;
 export const DEFAULT_RDP_PORT = DEFAULT_PORT.rdp;
@@ -115,11 +116,11 @@ export function isIpv6Literal(value: string): boolean {
 }
 
 function endpoint(address: string, digits: string, allowDisplayNumber: boolean): AddressResult {
-  if (address === "") return { ok: false, error: "Enter an address before the colon" };
+  if (address === "") return { ok: false, error: t("Enter an address before the colon") };
   const typed = Number(digits);
   const port = allowDisplayNumber && typed < MAX_DISPLAY_NUMBER ? DEFAULT_VNC_PORT + typed : typed;
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    return { ok: false, error: "Port must be between 1 and 65535" };
+    return { ok: false, error: t("Port must be between 1 and 65535") };
   }
   return { ok: true, endpoint: { address, port, explicitPort: true } };
 }
@@ -158,12 +159,12 @@ function parseBoundary(text: string): TargetResult {
   // A long run of hex is a machine ID with a character missing or extra,
   // not a host name anybody has.
   if (/^[0-9a-fA-F]{40,}$/.test(text)) {
-    return { ok: false, error: `A machine ID has 64 characters, and this has ${text.length}` };
+    return { ok: false, error: t("A machine ID has 64 characters, and this has {count}", { count: text.length }) };
   }
   const at = text.lastIndexOf("@");
   const id = at >= 0 ? text.slice(0, at) : null;
   if (id !== null && !MACHINE_ID.test(id)) {
-    return { ok: false, error: "Before the @ goes the 64 character machine ID" };
+    return { ok: false, error: t("Before the @ goes the 64 character machine ID") };
   }
   // Parsed as an RDP address: no display numbers, so `box:6000` is a port.
   const where = parseConnectTarget(text.slice(at + 1), "rdp");
@@ -173,7 +174,7 @@ function parseBoundary(text: string): TargetResult {
       error:
         at >= 0 || /[.:]/.test(text)
           ? where.error
-          : "Enter the 64 character ID shown under Unattended access in DeskVNC Support, or an address",
+          : t("Enter the 64 character ID shown under Unattended access in DeskVNC Support, or an address"),
     };
   }
   const { address, port, explicitPort } = where.target;
@@ -193,7 +194,7 @@ function parseBoundary(text: string): TargetResult {
  */
 export function parseConnectTarget(input: string, assume?: ProtocolKind): TargetResult {
   const trimmed = input.trim();
-  if (trimmed === "") return { ok: false, error: "Enter an address" };
+  if (trimmed === "") return { ok: false, error: t("Enter an address") };
 
   const { protocol: named, rest, url } = readScheme(trimmed);
 
@@ -244,9 +245,9 @@ export function parseConnectTarget(input: string, assume?: ProtocolKind): Target
     }
   }
 
-  if (raw === "") return { ok: false, error: "Enter an address" };
-  if (/\s/.test(raw)) return { ok: false, error: "An address cannot contain spaces" };
-  if (/[/?#@]/.test(raw)) return { ok: false, error: "An address cannot contain / ? # or @" };
+  if (raw === "") return { ok: false, error: t("Enter an address") };
+  if (/\s/.test(raw)) return { ok: false, error: t("An address cannot contain spaces") };
+  if (/[/?#@]/.test(raw)) return { ok: false, error: t("An address cannot contain / ? # or @") };
 
   // Display numbers are a VNC convention and do not exist for RDP or SSH, so
   // `rdp://box:1` is port 1 and not 3390, and `ssh://box:1` is port 1 and not
@@ -264,7 +265,7 @@ export function parseConnectTarget(input: string, assume?: ProtocolKind): Target
   const bracketed = /^\[([^\]]+)\](?::(\d+))?$/.exec(raw);
   if (bracketed) {
     const [, inner, digits] = bracketed;
-    if (!isIpv6Literal(inner)) return { ok: false, error: `${inner} is not a valid IPv6 address` };
+    if (!isIpv6Literal(inner)) return { ok: false, error: t("{address} is not a valid IPv6 address", { address: inner }) };
     // Brackets exist to delimit the address, so a number after them is always
     // a literal port. Reading `[::1]:1` as display 1 would be a nasty surprise.
     if (digits === undefined) {
@@ -276,7 +277,7 @@ export function parseConnectTarget(input: string, assume?: ProtocolKind): Target
     return done(endpoint(inner, digits, false));
   }
   if (raw.includes("[") || raw.includes("]")) {
-    return { ok: false, error: "Write an IPv6 address as [::1] or [::1]:5901" };
+    return { ok: false, error: t("Write an IPv6 address as [::1] or [::1]:5901") };
   }
 
   // Before the `host::port` rule below, or `fe80::1` would parse as host
@@ -300,7 +301,7 @@ export function parseConnectTarget(input: string, assume?: ProtocolKind): Target
     // as host `1::2` port 3 would be a guess dressed up as an answer. An IPv6
     // address with a port has exactly one spelling and it has brackets.
     if (isIpv6Literal(explicit[1])) {
-      return { ok: false, error: "Write an IPv6 address as [::1] or [::1]:5901" };
+      return { ok: false, error: t("Write an IPv6 address as [::1] or [::1]:5901") };
     }
     return done(endpoint(explicit[1], explicit[2], false));
   }
@@ -308,8 +309,8 @@ export function parseConnectTarget(input: string, assume?: ProtocolKind): Target
   const suffixed = /^(.+?):(\d+)$/.exec(raw);
   if (suffixed) return done(endpoint(suffixed[1], suffixed[2], displayNumbers));
 
-  if (raw.startsWith(":")) return { ok: false, error: "Enter an address before the colon" };
-  if (raw.includes(":")) return { ok: false, error: "Add a port or display number after the colon" };
+  if (raw.startsWith(":")) return { ok: false, error: t("Enter an address before the colon") };
+  if (raw.includes(":")) return { ok: false, error: t("Add a port or display number after the colon") };
   return {
     ok: true,
     target: { address: raw, port: fallbackPort, explicitPort: false, protocol, username },

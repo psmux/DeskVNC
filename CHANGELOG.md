@@ -10,6 +10,21 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+* The desktop app can be shown in Simplified Chinese (#97). Preferences ▸
+  General has a Language setting. It starts on Follow System, which picks
+  Chinese on a computer set to Simplified Chinese and English everywhere
+  else; anything not translated yet appears in English. The library window,
+  its tabs and quick connect, the host editor, Preferences, the password,
+  certificate and host key prompts, and the native menus and tray menu are
+  translated. The session toolbar and the other windows are still English
+  for now. SSH, VNC, RDP, SFTP and addresses such as `ssh://` are left as
+  they are. The text lives in one catalog file per language under
+  `ui/src/i18n/locales/`, keyed by the English, so another language is one
+  more file. Chinese characters use PingFang SC on macOS, Microsoft YaHei on
+  Windows and Noto Sans CJK SC (or Source Han Sans, or WenQuanYi) on Linux.
+
 ## [0.36.9] (2026-11-28)
 
 ### Added
