@@ -10,6 +10,8 @@
  *   session:// and discovery:// events                -> src-tauri/src/commands/
  */
 
+import { t } from "../i18n";
+
 /**
  * `remote_core::ProtocolKind`, serde `rename_all = "kebab-case"`, which for
  * these three spells them exactly as they are written here.
@@ -71,7 +73,8 @@ const PROTOCOL_NAMES: Record<ProtocolKind, string> = {
 };
 
 export function protocolName(p: ProtocolKind): string {
-  return PROTOCOL_NAMES[p];
+  // The catalog carries each of these; the protocol names inside stay as they are.
+  return t(PROTOCOL_NAMES[p]);
 }
 
 export type OsHint = "macos" | "windows" | "linux" | "qemu" | "unknown";
