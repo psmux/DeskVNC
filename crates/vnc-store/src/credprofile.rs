@@ -386,12 +386,17 @@ pub fn delete_credential_profile(
 mod tests {
     use super::*;
 
+    /// A throwaway secret made at run time, so no password sits in the source.
+    fn test_secret() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
     fn stores() -> (tempfile::TempDir, Store, CredentialStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(Some(dir.path().to_path_buf())).unwrap();
         let creds = CredentialStore::new_with_file_backend(dir.path().to_path_buf());
         creds.set_kdf_params_for_tests(8, 1, 1);
-        creds.unlock("pw").unwrap();
+        creds.unlock(&test_secret()).unwrap();
         (dir, store, creds)
     }
 
@@ -536,12 +541,13 @@ mod tests {
         let own = host("Own", ProtocolKind::Vnc);
         store.save_host(&own).unwrap();
         let mut mine = StoredCredentials::default();
-        mine.set_vnc_credential(None, "mine");
+        let mine_pw = test_secret();
+        mine.set_vnc_credential(None, &mine_pw);
         creds.save(&own.id, &mine).unwrap();
         let got = resolve_host_credentials(&store, &creds, &own.id)
             .unwrap()
             .unwrap();
-        assert_eq!(got.vnc_password.as_deref(), Some("mine"));
+        assert_eq!(got.vnc_password.as_deref(), Some(mine_pw.as_str()));
         assert!(got.vencrypt_user.is_none());
     }
 
@@ -566,8 +572,9 @@ mod tests {
         rdp.credential_id = Some(cred.id.clone());
         store.save_host(&rdp).unwrap();
         let mut own = StoredCredentials::default();
-        own.set_rdp_identity(Some("old"), Some("OLDDOM"), "oldpw");
-        own.rdg_password = Some("gateway".into());
+        let gateway_pw = test_secret();
+        own.set_rdp_identity(Some("old"), Some("OLDDOM"), &test_secret());
+        own.rdg_password = Some(gateway_pw.clone());
         creds.save(&rdp.id, &own).unwrap();
 
         let got = resolve_host_credentials(&store, &creds, &rdp.id)
@@ -576,7 +583,7 @@ mod tests {
         assert_eq!(got.rdp_user.as_deref(), Some("bob"));
         assert_eq!(got.rdp_domain, None, "a stale domain does not survive");
         assert_eq!(got.rdp_password.as_deref(), Some("shared"));
-        assert_eq!(got.rdg_password.as_deref(), Some("gateway"));
+        assert_eq!(got.rdg_password.as_deref(), Some(gateway_pw.as_str()));
     }
 
     #[test]
