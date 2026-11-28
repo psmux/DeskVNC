@@ -10,6 +10,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.36.10] (2026-11-28)
+
 ### Added
 
 * The desktop app can be shown in Simplified Chinese (#97). Preferences ▸
