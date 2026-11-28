@@ -5,8 +5,11 @@
  * in at the Mac: their screen, which asks them to accept first, or a session
  * of the viewer's own. The shell sends `mac-session-choice` when the host is
  * set to ask, and `mac-session-waiting` while the person at the Mac decides.
- * The copy lives here, apart from React, so it can be tested.
+ * The copy lives here, apart from React, so it can be tested. Each sentence
+ * is whole in the catalog, with the name as a value, because word order and
+ * the possessive differ between languages.
  */
+import { currentLanguage, t } from "../i18n";
 
 /** What the session overlay shows for a Mac with someone at it. */
 export type MacSessionPrompt =
@@ -16,11 +19,14 @@ export type MacSessionPrompt =
 /** The per host default, as the host record stores it. Null is ask. */
 export type MacSessionPref = "ask" | "share" | "separate";
 
-export const MAC_SESSION_OPTIONS: { value: MacSessionPref; label: string }[] = [
-  { value: "ask", label: "Ask each time" },
-  { value: "share", label: "Ask to share their screen" },
-  { value: "separate", label: "Log in to a separate session" },
-];
+/** The choices the host editor offers, in the language in use. */
+export function macSessionOptions(): { value: MacSessionPref; label: string }[] {
+  return [
+    { value: "ask", label: t("Ask each time") },
+    { value: "share", label: t("Ask to share their screen") },
+    { value: "separate", label: t("Log in to a separate session") },
+  ];
+}
 
 /** Read a stored value. Anything this build does not know means ask. */
 export function parseMacSessionPref(value: string | null | undefined): MacSessionPref {
@@ -38,24 +44,36 @@ export function storeMacSessionPref(value: MacSessionPref): string | null {
  */
 export function macUserLabel(consoleUser: string): string {
   const name = consoleUser.trim();
-  return name ? name : "The person at the Mac";
+  return name ? name : t("The person at the Mac");
 }
 
 export function macChoiceTitle(consoleUser: string): string {
   const name = consoleUser.trim();
-  return name ? `${name} is using this Mac` : "Someone is using this Mac";
+  return name ? t("{name} is using this Mac", { name }) : t("Someone is using this Mac");
+}
+
+/** The first paragraph of the choice: what asking to share does. */
+export function macShareText(consoleUser: string): string {
+  const name = consoleUser.trim();
+  return name
+    ? t("You can ask {name} to share their screen. A request comes up on the Mac, and you see their screen once they accept it.", { name })
+    : t("You can ask the person at the Mac to share their screen. A request comes up on the Mac, and you see their screen once they accept it.");
 }
 
 export function macWaitingText(consoleUser: string): string {
-  return `Waiting for ${macUserLabel(consoleUser)} to accept the request to share their screen.`;
+  const name = consoleUser.trim();
+  return name
+    ? t("Waiting for {name} to accept the request to share their screen.", { name })
+    : t("Waiting for the person at the Mac to accept the request to share their screen.");
 }
 
 export function macShareWithdrawn(consoleUser: string): string {
-  return `The request to share ${possessive(consoleUser)} screen was withdrawn.`;
-}
-
-function possessive(consoleUser: string): string {
   const name = consoleUser.trim();
-  if (!name) return "the Mac user's";
-  return name.endsWith("s") ? `${name}'` : `${name}'s`;
+  if (!name) return t("The request to share the Mac user's screen was withdrawn.");
+  // English spells the possessive by the name's last letter, which no
+  // catalog entry can do, so English keeps its own rule.
+  if (currentLanguage() === "en") {
+    return `The request to share ${name.endsWith("s") ? `${name}'` : `${name}'s`} screen was withdrawn.`;
+  }
+  return t("The request to share {name}'s screen was withdrawn.", { name });
 }

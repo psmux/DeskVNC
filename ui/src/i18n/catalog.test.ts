@@ -45,6 +45,8 @@ export const TRANSLATED = [
   "components/CertPrompt.tsx",
   "components/SshHostKeyPrompt.tsx",
   "components/SaveTabHostDialog.tsx",
+  "components/MacSessionPrompt.tsx",
+  "lib/macSession.ts",
 ];
 
 /**

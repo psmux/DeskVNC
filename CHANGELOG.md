@@ -18,13 +18,13 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   else; anything not translated yet appears in English. The library window,
   its tabs and quick connect, the host editor, Preferences, the password,
   certificate and host key prompts, and the native menus and tray menu are
-  translated. The session toolbar and the other windows are still English
+  translated, and so is the choice a Mac offers when someone is using it.
+  The session toolbar and the other windows are still English
   for now. SSH, VNC, RDP, SFTP and addresses such as `ssh://` are left as
   they are. The text lives in one catalog file per language under
   `ui/src/i18n/locales/`, keyed by the English, so another language is one
   more file. Chinese characters use PingFang SC on macOS, Microsoft YaHei on
   Windows and Noto Sans CJK SC (or Source Han Sans, or WenQuanYi) on Linux.
-
 * Connecting to a Mac that someone else is logged in to now offers the same
   choice as Apple's Screen Sharing: ask that person for permission to share
   their screen, or log in to a separate session of your own. While the Mac

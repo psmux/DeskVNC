@@ -43,7 +43,7 @@ import { MOCK_LOCAL_KEYS, useMockData } from "../lib/mock";
 import { portOnProtocolChange, portWasTouched, vncTakesUsername } from "../lib/hostDraft";
 import { parseConnectTarget } from "../lib/address";
 import { Dialog, Select } from "./primitives";
-import { MAC_SESSION_OPTIONS, parseMacSessionPref, type MacSessionPref } from "../lib/macSession";
+import { macSessionOptions, parseMacSessionPref, type MacSessionPref } from "../lib/macSession";
 import { IconChevronDown, IconChevronRight } from "./icons";
 import { classNames } from "../lib/util";
 import { t, useT } from "../i18n";
@@ -810,14 +810,14 @@ export function HostDialog({
                     ) : null}
                     {caps.rfbSecurity ? (
                       <Field
-                        label="When someone is using the Mac"
-                        hint="macOS Screen Sharing only. Sharing their screen asks them to accept first."
+                        label={t("When someone is using the Mac")}
+                        hint={t("macOS Screen Sharing only. Sharing their screen asks them to accept first.")}
                       >
                         <Select
                           value={d.macSession}
                           onChange={(e) => set({ macSession: parseMacSessionPref(e.target.value) })}
                         >
-                          {MAC_SESSION_OPTIONS.map((o) => (
+                          {macSessionOptions().map((o) => (
                             <option key={o.value} value={o.value}>
                               {o.label}
                             </option>
