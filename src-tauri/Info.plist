@@ -10,6 +10,15 @@
 	     background, where App Nap would slow its capture. -->
 	<key>LSAppNapIsDisabled</key>
 	<true/>
+	<!-- The languages the interface is translated into. Without this list
+	     macOS treats the app as English only, and the panels it draws for
+	     the app (the file picker, the standard menu items) stay in English
+	     on a Chinese system. -->
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>zh-Hans</string>
+	</array>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_rfb._tcp</string>

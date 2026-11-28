@@ -5,17 +5,40 @@
 //! window and emits `tray://connect` with the host id so the frontend starts
 //! the connection through its normal path.
 
-use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 
+use crate::i18n::tr;
 use crate::state::AppState;
 
 const MAX_RECENT: usize = 5;
 
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
+    let menu = build_menu(app)?;
+    let mut tray = TrayIconBuilder::with_id("main")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .tooltip("DeskVNCViewer")
+        .on_menu_event(|app, event| handle_tray_event(app, event.id().as_ref()));
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+/// The tray menu again, in the language now in use.
+pub fn relabel(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(tray) = app.tray_by_id("main") {
+        tray.set_menu(Some(build_menu(app)?))?;
+    }
+    Ok(())
+}
+
+fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let mut builder = MenuBuilder::new(app)
-        .item(&MenuItemBuilder::with_id("tray:open", "Open DeskVNCViewer").build(app)?);
+        .item(&MenuItemBuilder::with_id("tray:open", tr("Open DeskVNCViewer")).build(app)?);
 
     let recent = recent_hosts(app);
     if !recent.is_empty() {
@@ -27,21 +50,10 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 .item(&MenuItemBuilder::with_id(format!("tray:host:{host_id}"), name).build(app)?);
         }
     }
-    let menu = builder
+    builder
         .separator()
-        .item(&MenuItemBuilder::with_id("tray:quit", "Quit DeskVNCViewer").build(app)?)
-        .build()?;
-
-    let mut tray = TrayIconBuilder::with_id("main")
-        .menu(&menu)
-        .show_menu_on_left_click(true)
-        .tooltip("DeskVNCViewer")
-        .on_menu_event(|app, event| handle_tray_event(app, event.id().as_ref()));
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
-    }
-    tray.build(app)?;
-    Ok(())
+        .item(&MenuItemBuilder::with_id("tray:quit", tr("Quit DeskVNCViewer")).build(app)?)
+        .build()
 }
 
 fn handle_tray_event(app: &AppHandle, id: &str) {

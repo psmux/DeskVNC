@@ -19,6 +19,7 @@ import type { TabSummary } from "../state/TabsContext";
 import { SESSION_PANEL_ID } from "./SplitView";
 import { ContextMenu, type MenuItem } from "./primitives";
 import { IconChevronLeft, IconChevronRight, IconGrid, IconX } from "./icons";
+import { t, useT } from "../i18n";
 
 /**
  * DOM id of the surface a tab controls.
@@ -37,13 +38,13 @@ export function tabPanelId(id: string | null): string {
 function statusOf(state: SessionState): { className: string; label: string } {
   switch (state.state) {
     case "connected":
-      return { className: "bg-success", label: "Connected" };
+      return { className: "bg-success", label: t("Connected") };
     case "disconnected":
-      return { className: "bg-danger", label: "Disconnected" };
+      return { className: "bg-danger", label: t("Disconnected") };
     case "reconnecting":
-      return { className: "bg-warning animate-pulse", label: "Reconnecting" };
+      return { className: "bg-warning animate-pulse", label: t("Reconnecting") };
     default:
-      return { className: "bg-accent animate-pulse", label: "Connecting" };
+      return { className: "bg-accent animate-pulse", label: t("Connecting") };
   }
 }
 
@@ -84,6 +85,7 @@ export function TabStrip({
   /** That item was chosen on this tab. */
   onSaveHost?: (tabId: string) => void;
 }): ReactNode {
+  const t = useT();
   const activeRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [overflow, setOverflow] = useState({ left: false, right: false });
@@ -141,7 +143,7 @@ export function TabStrip({
   };
 
   const menuItems = (id: string | null): MenuItem[] => {
-    const ids = tabs.map((t) => t.id);
+    const ids = tabs.map((tab) => tab.id);
     const item = (label: string, scope: CloseScope, separatorAbove = false): MenuItem => {
       const closing = tabsToClose(ids, id, scope);
       return {
@@ -152,18 +154,18 @@ export function TabStrip({
       };
     };
     // The library cannot close, so all it can offer is clearing the strip.
-    if (id === null) return [item("Close all tabs", "all")];
-    const tab = tabs.find((t) => t.id === id);
+    if (id === null) return [item(t("Close all tabs"), "all")];
+    const tab = tabs.find((each) => each.id === id);
     const keepLabel = tab && onSaveHost ? saveHostLabel?.(tab) ?? null : null;
     const keep: MenuItem[] =
       keepLabel && onSaveHost ? [{ label: keepLabel, onSelect: () => onSaveHost(id) }] : [];
     return [
       ...keep,
-      item("Close tab", "this", keep.length > 0),
-      item("Close other tabs", "others", true),
-      item("Close tabs to the left", "left"),
-      item("Close tabs to the right", "right"),
-      item("Close all tabs", "all", true),
+      item(t("Close tab"), "this", keep.length > 0),
+      item(t("Close other tabs"), "others", true),
+      item(t("Close tabs to the left"), "left"),
+      item(t("Close tabs to the right"), "right"),
+      item(t("Close all tabs"), "all", true),
     ];
   };
 
@@ -189,7 +191,7 @@ export function TabStrip({
     <div className="flex shrink-0 items-stretch border-b border-subtle bg-inset/50">
       {scrolls ? (
         <ScrollButton
-          label="Scroll tabs left"
+          label={t("Scroll tabs left")}
           disabled={!overflow.left}
           onClick={() => scrollByPage(-1)}
           icon={<IconChevronLeft size={14} />}
@@ -198,7 +200,7 @@ export function TabStrip({
       <div
         ref={scrollerRef}
         role="tablist"
-        aria-label="Open sessions"
+        aria-label={t("Open sessions")}
         className={classNames(
           "tab-scroller flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto pt-1.5",
           scrolls ? "px-0.5" : "px-2",
@@ -212,7 +214,7 @@ export function TabStrip({
           onMenu={(x, y) => setMenu({ id: null, x, y })}
           panelId={tabPanelId(null)}
           icon={<IconGrid size={13} />}
-          label="Library"
+          label={t("Library")}
         />
         {tabs.map((tab) => {
           const selected = tab.id === activeId;
@@ -248,14 +250,14 @@ export function TabStrip({
               label={tab.title}
               // Said in words rather than left to a shape, because a shape is
               // exactly what a screen reader cannot pass on.
-              status={driven ? `${status.label}, agent driving` : status.label}
+              status={driven ? t("{status}, agent driving", { status: status.label }) : status.label}
             />
           );
         })}
       </div>
       {scrolls ? (
         <ScrollButton
-          label="Scroll tabs right"
+          label={t("Scroll tabs right")}
           disabled={!overflow.right}
           onClick={() => scrollByPage(1)}
           icon={<IconChevronRight size={14} />}
@@ -334,6 +336,7 @@ function Tab({
   label: string;
   status?: string;
 }): ReactNode {
+  const t = useT();
   return (
     <div
       ref={ref}
@@ -343,7 +346,7 @@ function Tab({
       // Named explicitly rather than from its contents: the close button is a
       // focusable descendant, so otherwise every tab would announce itself as
       // "my-desktop, Close my-desktop".
-      aria-label={status ? `${label}, ${status}` : label}
+      aria-label={status ? t("{label}, {status}", { label, status }) : label}
       // Roving tabindex: Tab reaches the strip, then Left/Right move within it.
       tabIndex={selected ? 0 : -1}
       title={label}
@@ -382,7 +385,7 @@ function Tab({
       {onClose ? (
         <button
           type="button"
-          aria-label={`Close ${label}`}
+          aria-label={t("Close {name}", { name: label })}
           // Always visible on the tab in front: a close button that only shows
           // on hover cannot be found without a pointer.
           className={classNames(

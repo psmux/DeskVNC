@@ -12,6 +12,7 @@
 import { mustInvoke, safeInvoke } from "./tauri";
 import { hostProtocol, type HostProfile, type ProtocolKind } from "./types";
 import { isLockedError, type SaveOutcome } from "./credentialStore";
+import { t, tn } from "../i18n";
 
 export type SavedCredentialKind = "password" | "ssh-key";
 
@@ -87,17 +88,26 @@ export function hostHasSavedSecret(host: HostProfile, all: SavedCredential[]): b
 
 /** One line under the picker saying what the host will sign in as. */
 export function describeCredential(c: SavedCredential): string {
-  const who = c.username?.trim()
+  const user = c.username?.trim()
     ? c.domain?.trim()
       ? `${c.domain.trim()}\\${c.username.trim()}`
       : c.username.trim()
     : null;
   if (c.kind === "ssh-key") {
-    const key = c.keyPath ? c.keyPath.split(/[\\/]/).pop() : "no key file chosen";
-    return `${who ? `Signs in as ${who}` : "Signs in as the same user as this computer"} with the key ${key}.`;
+    const key = c.keyPath?.split(/[\\/]/).pop();
+    if (!key) return t("No key file is chosen yet.");
+    return user
+      ? t("Signs in as {user} with the key {key}.", { user, key })
+      : t("Signs in as the same user as this computer with the key {key}.", { key });
   }
-  const secret = c.hasSecret ? "and its saved password" : "and asks for the password when you connect";
-  return `${who ? `Signs in as ${who}` : "Asks for the user name if the computer wants one"} ${secret}.`;
+  if (user) {
+    return c.hasSecret
+      ? t("Signs in as {user} with its saved password.", { user })
+      : t("Signs in as {user} and asks for the password when you connect.", { user });
+  }
+  return c.hasSecret
+    ? t("Asks for the user name if the computer wants one, and uses its saved password.")
+    : t("Asks for the user name and password when you connect.");
 }
 
 /**
@@ -106,12 +116,17 @@ export function describeCredential(c: SavedCredential): string {
  * connecting.
  */
 export function deleteSummary(c: SavedCredential, using: HostProfile[]): string {
-  if (using.length === 0) return `No host uses ${c.name}. Deleting it removes its saved password too.`;
+  if (using.length === 0) {
+    return t("No host uses {name}. Deleting it removes its saved password too.", { name: c.name });
+  }
   const names = using.map((h) => h.friendlyName || h.address);
   const list =
-    names.length <= 5 ? names.join(", ") : `${names.slice(0, 5).join(", ")} and ${names.length - 5} more`;
-  const count = using.length === 1 ? "1 host uses it" : `${using.length} hosts use it`;
-  return `${count}: ${list}. Keep a copy on each host and they connect as before, each with its own copy that no longer follows changes. Otherwise they ask for a user name and password on their next connect.`;
+    names.length <= 5
+      ? names.join(", ")
+      : t("{names} and {more} more", { names: names.slice(0, 5).join(", "), more: names.length - 5 });
+  return `${tn(using.length, "1 host uses it: {list}.", "{count} hosts use it: {list}.", { list })} ${t(
+    "Keep a copy on each host and they connect as before, each with its own copy that no longer follows changes. Otherwise they ask for a user name and password on their next connect.",
+  )}`;
 }
 
 export function listSavedCredentials(): Promise<SavedCredential[]> {

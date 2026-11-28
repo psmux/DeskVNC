@@ -15,8 +15,10 @@ import {
 } from "../lib/savedCredentials";
 import { SavedCredentialDialog } from "./HostDialog";
 import { Dialog } from "./primitives";
+import { t, tn, useT } from "../i18n";
 
 export function SavedCredentialsSection(): ReactNode {
+  useT();
   const { hosts, savedCredentials, refresh } = useHosts();
   const [editing, setEditing] = useState<SavedCredential | null>(null);
   const [deleting, setDeleting] = useState<SavedCredential | null>(null);
@@ -38,17 +40,18 @@ export function SavedCredentialsSection(): ReactNode {
 
   return (
     <div>
-      <p className="text-sm font-medium text-primary">Saved credentials</p>
+      <p className="text-sm font-medium text-primary">{t("Saved credentials")}</p>
       <p className="text-xs text-tertiary">
-        A user name and password, or an SSH key, saved once and picked in any host&apos;s editor. Change it
-        here and every host that uses it signs in with the new one.
+        {t(
+          "A user name and password, or an SSH key, saved once and picked in any host's editor. Change it here and every host that uses it signs in with the new one.",
+        )}
       </p>
       {list.length === 0 ? (
         <p className="mt-2 text-xs text-secondary">
-          None yet. Add one here, or choose &quot;New saved credential&quot; in a host&apos;s editor.
+          {t("None yet. Add one here, or choose New saved credential in a host's editor.")}
         </p>
       ) : (
-        <ul className="mt-2 divide-y divide-subtle rounded-md border border-subtle" aria-label="Saved credentials">
+        <ul className="mt-2 divide-y divide-subtle rounded-md border border-subtle" aria-label={t("Saved credentials")}>
           {list.map((c) => {
             const n = hostsUsing(c.id, hosts).length;
             return (
@@ -56,14 +59,14 @@ export function SavedCredentialsSection(): ReactNode {
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm text-primary">{c.name}</p>
                   <p className="truncate text-xs text-tertiary">
-                    {describeCredential(c)} {n === 0 ? "No host uses it." : n === 1 ? "Used by 1 host." : `Used by ${n} hosts.`}
+                    {describeCredential(c)} {n === 0 ? t("No host uses it.") : tn(n, "Used by 1 host.", "Used by {count} hosts.")}
                   </p>
                 </div>
                 <button type="button" className="btn-secondary" onClick={() => setEditing(c)}>
-                  Edit
+                  {t("Edit")}
                 </button>
                 <button type="button" className="btn-secondary" onClick={() => setDeleting(c)}>
-                  Delete
+                  {t("Delete")}
                 </button>
               </li>
             );
@@ -71,7 +74,7 @@ export function SavedCredentialsSection(): ReactNode {
         </ul>
       )}
       <button type="button" className="btn-secondary mt-2" onClick={() => setEditing(blankSavedCredential())}>
-        Add saved credential
+        {t("Add saved credential")}
       </button>
       {error ? (
         <p className="mt-2 text-xs text-danger" role="alert">
@@ -91,26 +94,26 @@ export function SavedCredentialsSection(): ReactNode {
       ) : null}
 
       {deleting ? (
-        <Dialog title={`Delete ${deleting.name}?`} onClose={() => setDeleting(null)} danger width={460}>
+        <Dialog title={t("Delete {name}?", { name: deleting.name })} onClose={() => setDeleting(null)} danger width={460}>
           <p className="text-sm text-secondary" data-testid="delete-credential-summary">
             {deleteSummary(deleting, using)}
           </p>
           <div className="mt-4 flex flex-wrap justify-end gap-2">
             <button type="button" className="btn-secondary" onClick={() => setDeleting(null)}>
-              Cancel
+              {t("Cancel")}
             </button>
             {using.length > 0 ? (
               <>
                 <button type="button" className="btn-secondary" onClick={() => void remove(deleting, false)}>
-                  Delete, hosts will ask
+                  {t("Delete, hosts will ask")}
                 </button>
                 <button type="button" className="btn-danger" onClick={() => void remove(deleting, true)}>
-                  Delete, keep a copy on each host
+                  {t("Delete, keep a copy on each host")}
                 </button>
               </>
             ) : (
               <button type="button" className="btn-danger" onClick={() => void remove(deleting, false)}>
-                Delete
+                {t("Delete")}
               </button>
             )}
           </div>

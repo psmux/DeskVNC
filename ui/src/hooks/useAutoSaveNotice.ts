@@ -19,6 +19,7 @@ import {
   type SessionConnectedPayload,
 } from "../lib/autoSave";
 import type { ToastKind } from "../state/ToastContext";
+import { t } from "../i18n";
 
 /**
  * How long after first connecting the session reports in. The server's name
@@ -64,7 +65,7 @@ export function useAutoSaveNotice(
     let cancelled = false;
     void safeListen<HostAutoSavedPayload>(HOST_AUTOSAVED_EVENT, (ev) => {
       if (cancelled || !ev || ev.sessionId !== sessionId || typeof ev.name !== "string") return;
-      pushRef.current("info", `Saved ${ev.name} to your Library`);
+      pushRef.current("info", t("Saved {name} to your Library", { name: ev.name }));
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;

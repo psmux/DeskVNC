@@ -28,6 +28,8 @@
     "allow-get-app-setting",
     "allow-about-info",
     "allow-sync-session-menu",
+    "allow-ui-language",
+    "allow-set-ui-language",
     "allow-touch-connected",
     "allow-save-password",
     "allow-has-password",

@@ -135,6 +135,10 @@ fn main() {
             // the native menu mirrors the session toolbar, so the webview has
             // to push it the state that toolbar would have shown
             "sync_session_menu",
+            // the interface language: reading the choice and the system's
+            // languages, and changing it, which rebuilds the native menus
+            "ui_language",
+            "set_ui_language",
             // `.rdp` file import. The webview sends a PATH and the shell
             // reads the file, so these are the only two new command names
             // this work adds and each is a grant to review on its own.
