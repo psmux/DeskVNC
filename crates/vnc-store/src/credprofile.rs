@@ -341,6 +341,7 @@ pub fn delete_credential_profile(
     id: &str,
     keep_on_hosts: bool,
 ) -> Result<Vec<String>> {
+    let mut copied = Vec::new();
     if keep_on_hosts {
         let cred = store.get_credential(id)?;
         for (host_id, _) in store.hosts_using_credential(id)? {
@@ -362,9 +363,12 @@ pub fn delete_credential_profile(
             }
             host.credential_id = None;
             store.save_host(&host)?;
+            copied.push(host_id);
         }
     }
-    let unlinked = store.delete_credential(id)?;
+    let mut unlinked = store.delete_credential(id)?;
+    unlinked.extend(copied);
+    unlinked.sort();
     match creds.delete(&CredentialProfile::secret_account(id)) {
         Ok(()) => {}
         // The row is gone, so nothing will ever read the secret again; a
@@ -712,7 +716,11 @@ mod tests {
         store.save_host(&rdp).unwrap();
         store.save_host(&ssh).unwrap();
 
-        delete_credential_profile(&store, &creds, &cred.id, true).unwrap();
+        assert_eq!(
+            delete_credential_profile(&store, &creds, &cred.id, true).unwrap(),
+            vec![rdp.id.clone()],
+            "the hosts that were given a copy are the ones unlinked"
+        );
         delete_credential_profile(&store, &creds, &key.id, true).unwrap();
 
         let rdp_row = store.get_host(&rdp.id).unwrap().unwrap();
