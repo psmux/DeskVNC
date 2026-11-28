@@ -39,6 +39,8 @@ import {
 } from "../lib/rdpDefaults";
 import { classNames } from "../lib/util";
 import { IconX } from "../components/icons";
+import { LANGUAGES, useT, type LanguagePreference } from "../i18n";
+import { chooseLanguage, readLanguageState } from "../i18n/preference";
 
 const TABS = [
   "General", "Appearance", "Connections", "Session", "Input", "Clipboard", "Files", "Security", "Network", "Agents",
@@ -114,6 +116,42 @@ function useAppSetting(key: string, initial: boolean): [boolean, (v: boolean) =>
     [key],
   );
   return [v, set];
+}
+
+/**
+ * The interface language: a language, or whatever the system is set to.
+ *
+ * Saved in the Rust store (see `i18n/preference`), which rebuilds the native
+ * menus and tells every open window, so nothing here has to.
+ */
+function LanguageSetting(): ReactNode {
+  const t = useT();
+  const [preference, setPreference] = useState<LanguagePreference>("system");
+  useEffect(() => {
+    let cancelled = false;
+    void readLanguageState().then((state) => {
+      if (!cancelled) setPreference(state.preference);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const options: [LanguagePreference, string][] = [
+    ["system", t("Follow System")],
+    ...LANGUAGES.map((l): [LanguagePreference, string] => [l.code, l.name]),
+  ];
+  return (
+    <Choice<LanguagePreference>
+      label={t("Language")}
+      description={t("Follow System uses the language your computer is set to. Anything not translated yet is shown in English.")}
+      value={preference}
+      options={options}
+      onChange={(next) => {
+        setPreference(next);
+        void chooseLanguage(next).then((state) => setPreference(state.preference));
+      }}
+    />
+  );
 }
 
 /**
@@ -262,6 +300,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
           <div className="flex-1 space-y-5 overflow-y-auto p-5">
             {tab === "General" ? (
               <>
+                <LanguageSetting />
                 <Toggle
                   label="Confirm before disconnecting"
                   description="Ask before ending a session from the toolbar"
