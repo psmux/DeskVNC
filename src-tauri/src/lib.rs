@@ -8,6 +8,7 @@
 mod agent;
 mod commands;
 mod framing;
+mod i18n;
 mod logging;
 mod menu;
 mod state;
@@ -117,6 +118,9 @@ pub fn run() {
             let files_state = commands::files::FilesState::new(data_dir);
             let host_keys = files_state.host_key_verifier();
             app.manage(AppState::new(store, credentials, host_keys));
+            // The interface language, read before the menus below are built
+            // so they come up in it.
+            commands::i18n::load(&app.state::<AppState>());
             // Boundary's lasting helper identity, and saving computers that
             // pair this helper, so they appear in the Library to reopen.
             commands::boundary::install(app.handle(), &boundary_dir);
@@ -253,6 +257,8 @@ pub fn run() {
             commands::hosts::set_app_setting,
             // native menu
             commands::menu::sync_session_menu,
+            commands::i18n::ui_language,
+            commands::i18n::set_ui_language,
             // .rdp file import
             commands::rdpfile::import_rdp_file,
             commands::rdpfile::import_rdp_files,

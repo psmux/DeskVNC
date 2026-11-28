@@ -44,6 +44,8 @@
     "allow-about-info",
     "allow-set-app-setting",
     "allow-sync-session-menu",
+    "allow-ui-language",
+    "allow-set-ui-language",
     "allow-import-rdp-file",
     "allow-import-rdp-files",
 

@@ -10,6 +10,7 @@ pub mod credentials;
 pub mod discovery;
 pub mod files;
 pub mod hosts;
+pub mod i18n;
 pub mod menu;
 pub mod rdpfile;
 pub mod session;

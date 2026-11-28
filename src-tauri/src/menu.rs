@@ -12,8 +12,14 @@
 //! so the session view pushes its state through `sync_session_menu` whenever
 //! it changes and whenever its window takes the focus. The handles needed to
 //! apply that state are kept in [`SessionMenu`], managed alongside `AppState`.
+//!
+//! Every label comes from the translation catalog ([`crate::i18n`]). When the
+//! language changes the whole menu is built again ([`relabel`]) and the last
+//! state the webview pushed is applied to it, so the ticks survive.
 
 use std::collections::HashMap;
+
+use crate::i18n::{tr, tr_count};
 
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -75,6 +81,9 @@ pub struct SessionMenu {
     /// several times a second; the list only actually changes on connect, on a
     /// desktop resize, and when the seam detector finishes.
     displays_sig: String,
+    /// The last state the webview pushed, applied again to a menu rebuilt in
+    /// another language so it does not come back with every tick cleared.
+    last: Option<MenuSync>,
 }
 
 impl SessionMenu {
@@ -116,14 +125,14 @@ impl SessionMenu {
 /// not come off the wire: a server that never describes its monitors gets
 /// synthetic cuts and a seam detected from the pixels, neither of which the
 /// shell knows anything about.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DisplayEntry {
     id: i64,
     label: String,
 }
 
 /// Everything the menu needs to know about the session in front.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMenuState {
     /// `fit`, `aspect-fit`, `actual`, `remote-resize` or `custom`.
@@ -157,24 +166,29 @@ pub struct SessionMenuState {
 }
 
 /// The label for File Transfer.
-const FILES_LABEL: &str = "File Transfer…";
+fn files_label() -> String {
+    tr("File Transfer…")
+}
+
 /// The label on an SSH tab, where the item is greyed. A native menu item has
 /// no tooltip, so the reason goes in the label itself.
-const FILES_LABEL_TERMINAL: &str = "File Transfer (not available in an SSH tab)";
+fn files_label_terminal() -> String {
+    tr("File Transfer (not available in an SSH tab)")
+}
 
 /// Whether File Transfer is enabled, and what it says. An SSH tab never
 /// enables it, whatever else it reports: the item opens the SFTP panel beside
 /// a desktop session and an SSH tab has none, so an enabled item there did
 /// nothing at all.
-fn files_item(live: bool, files_available: bool, terminal: bool) -> (bool, &'static str) {
+fn files_item(live: bool, files_available: bool, terminal: bool) -> (bool, String) {
     if terminal {
-        return (false, FILES_LABEL_TERMINAL);
+        return (false, files_label_terminal());
     }
-    (live && files_available, FILES_LABEL)
+    (live && files_available, files_label())
 }
 
 /// The payload of `sync_session_menu`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MenuSync {
     /// Preferences ▸ Session, global rather than per session.
@@ -183,7 +197,9 @@ pub struct MenuSync {
     session: Option<SessionMenuState>,
 }
 
-pub fn install(app: &AppHandle) -> tauri::Result<()> {
+/// Build the whole menu bar in the language in use, set it on the app, and
+/// hand back the handles that mirror a session.
+fn build(app: &AppHandle) -> tauri::Result<SessionMenu> {
     let builder = MenuBuilder::new(app);
     let mut checks: HashMap<&'static str, CheckMenuItem<Wry>> = HashMap::new();
     let mut gated_items: Vec<MenuItem<Wry>> = Vec::new();
@@ -220,42 +236,42 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         // dialog carries the build fingerprint and the copy-a-report button
         // that bug reports need.
         let app_menu = SubmenuBuilder::new(app, "DeskVNCViewer")
-            .item(&MenuItemBuilder::with_id("menu:about", "About DeskVNCViewer").build(app)?)
+            .item(&MenuItemBuilder::with_id("menu:about", tr("About DeskVNCViewer")).build(app)?)
             .separator()
             .item(
-                &MenuItemBuilder::with_id("menu:settings", "Settings…")
+                &MenuItemBuilder::with_id("menu:settings", tr("Settings…"))
                     .accelerator("Cmd+,")
                     .build(app)?,
             )
             .separator()
-            .services()
+            .services_with_text(tr("Services"))
             .separator()
-            .hide()
-            .hide_others()
-            .show_all()
+            .hide_with_text(tr("Hide DeskVNCViewer"))
+            .hide_others_with_text(tr("Hide Others"))
+            .show_all_with_text(tr("Show All"))
             .separator()
-            .quit()
+            .quit_with_text(tr("Quit DeskVNCViewer"))
             .build()?;
         builder.item(&app_menu)
     };
 
-    let file = SubmenuBuilder::new(app, "File")
+    let file = SubmenuBuilder::new(app, tr("File"))
         .item(
-            &MenuItemBuilder::with_id("menu:new-host", "New Host…")
+            &MenuItemBuilder::with_id("menu:new-host", tr("New Host…"))
                 .accelerator("CmdOrCtrl+N")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id("menu:import-rdp", "Import Remote Desktop File…")
+            &MenuItemBuilder::with_id("menu:import-rdp", tr("Import Remote Desktop File…"))
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id("menu:quick-connect", "Connect to…")
+            &MenuItemBuilder::with_id("menu:quick-connect", tr("Connect to…"))
                 .accelerator("CmdOrCtrl+T")
                 .build(app)?,
         )
         .separator()
-        .close_window()
+        .close_window_with_text(tr("Close Window"))
         .build()?;
 
     // The six standard editing items, and on macOS they are not optional. A
@@ -270,34 +286,34 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     // its keyboard hook calls preventDefault on the chord it forwards, and a
     // handled key equivalent never reaches the menu, so under pass-through the
     // remote still gets the paste and the local field does not.
-    let edit = SubmenuBuilder::new(app, "Edit")
-        .undo()
-        .redo()
+    let edit = SubmenuBuilder::new(app, tr("Edit"))
+        .undo_with_text(tr("Undo"))
+        .redo_with_text(tr("Redo"))
         .separator()
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
+        .cut_with_text(tr("Cut"))
+        .copy_with_text(tr("Copy"))
+        .paste_with_text(tr("Paste"))
+        .select_all_with_text(tr("Select All"))
         .build()?;
 
-    let connection = SubmenuBuilder::new(app, "Connection")
-        .item(&MenuItemBuilder::with_id("menu:connect", "Connect").build(app)?)
+    let connection = SubmenuBuilder::new(app, tr("Connection"))
+        .item(&MenuItemBuilder::with_id("menu:connect", tr("Connect")).build(app)?)
         .item(
-            &MenuItemBuilder::with_id("menu:disconnect", "Disconnect")
+            &MenuItemBuilder::with_id("menu:disconnect", tr("Disconnect"))
                 .accelerator("CmdOrCtrl+Shift+D")
                 .build(app)?,
         )
-        .item(&MenuItemBuilder::with_id("menu:reconnect", "Reconnect Now").build(app)?)
+        .item(&MenuItemBuilder::with_id("menu:reconnect", tr("Reconnect Now")).build(app)?)
         .separator()
-        .item(&MenuItemBuilder::with_id("menu:wake", "Wake with Wake-on-LAN").build(app)?)
+        .item(&MenuItemBuilder::with_id("menu:wake", tr("Wake with Wake-on-LAN")).build(app)?)
         .build()?;
 
     // The monitor list is filled in by the first `sync_session_menu`; until
     // then the submenu says what an empty one means rather than sitting there
     // blank.
-    let displays = SubmenuBuilder::new(app, "Displays")
+    let displays = SubmenuBuilder::new(app, tr("Displays"))
         .item(
-            &MenuItemBuilder::with_id("menu:displays-none", "No session")
+            &MenuItemBuilder::with_id("menu:displays-none", tr("No session"))
                 .enabled(false)
                 .build(app)?,
         )
@@ -308,15 +324,9 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     // arrives. Remote Desktop only: RFB has no equivalent that a user chooses,
     // so the submenu is disabled for a VNC session rather than offering
     // choices that would do nothing.
-    let resolution = SubmenuBuilder::new(app, "Resolution")
-        .item(&check!(
-            "menu:res:connect",
-            "Match This Window When Connecting"
-        ))
-        .item(&check!(
-            "menu:res:follow",
-            "Match This Window, and Keep Matching"
-        ))
+    let resolution = SubmenuBuilder::new(app, tr("Resolution"))
+        .item(&check!("menu:res:connect", tr("Match This Window When Connecting")))
+        .item(&check!("menu:res:follow", tr("Match This Window, and Keep Matching")))
         .separator()
         .item(&check!("menu:res:1280x720", "1280 x 720"))
         .item(&check!("menu:res:1366x768", "1366 x 768"))
@@ -328,19 +338,16 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .build()?;
     gated_menus.push(resolution.clone());
 
-    let pointers = SubmenuBuilder::new(app, "Pointers")
-        .item(&check!("menu:remote-cursor", "Show the Remote Pointer"))
+    let pointers = SubmenuBuilder::new(app, tr("Pointers"))
+        .item(&check!("menu:remote-cursor", tr("Show the Remote Pointer")))
         .separator()
-        .item(&check!(
-            "menu:cursor:standard",
-            "My Pointer: Standard Arrow"
-        ))
-        .item(&check!("menu:cursor:dot", "My Pointer: Dot"))
-        .item(&check!("menu:cursor:off", "My Pointer: Hidden"))
+        .item(&check!("menu:cursor:standard", tr("My Pointer: Standard Arrow")))
+        .item(&check!("menu:cursor:dot", tr("My Pointer: Dot")))
+        .item(&check!("menu:cursor:off", tr("My Pointer: Hidden")))
         .build()?;
     gated_menus.push(pointers.clone());
 
-    let toggle_toolbar = MenuItemBuilder::with_id("menu:toggle-toolbar", "Show/Hide Toolbar")
+    let toggle_toolbar = MenuItemBuilder::with_id("menu:toggle-toolbar", tr("Show/Hide Toolbar"))
         .accelerator("CmdOrCtrl+Shift+M")
         .enabled(false)
         .build(app)?;
@@ -350,7 +357,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     // Cmd/Ctrl+- here would be stolen from every remote application for the
     // life of the app, which is the mistake the fullscreen chord below was
     // already fixed for once.
-    let view = SubmenuBuilder::new(app, "View")
+    let view = SubmenuBuilder::new(app, tr("View"))
         .item(
             // F11 on Windows/Linux, the convention there, and the chord this
             // used to carry ("CmdOrCtrl+Ctrl+F") collapsed to a plain Ctrl+F
@@ -358,7 +365,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             // Find, quietly stolen from the desktop being viewed. macOS keeps
             // Cmd+Ctrl+F, which is its own fullscreen convention and is not
             // in the way of anything.
-            &MenuItemBuilder::with_id("menu:toggle-fullscreen", "Toggle Fullscreen")
+            &MenuItemBuilder::with_id("menu:toggle-fullscreen", tr("Toggle Fullscreen"))
                 .accelerator(if cfg!(target_os = "macos") {
                     "CmdOrCtrl+Ctrl+F"
                 } else {
@@ -367,32 +374,32 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 .build(app)?,
         )
         .separator()
-        .item(&check!("menu:scale-fit", "Fit to Window"))
-        .item(&check!("menu:scale-aspect", "Aspect Fit"))
-        .item(&check!("menu:scale-actual", "Actual Size"))
-        .item(&check!("menu:scale-remote", "Remote Resize (Match Window)"))
+        .item(&check!("menu:scale-fit", tr("Fit to Window")))
+        .item(&check!("menu:scale-aspect", tr("Aspect Fit")))
+        .item(&check!("menu:scale-actual", tr("Actual Size")))
+        .item(&check!("menu:scale-remote", tr("Remote Resize (Match Window)")))
         .separator()
-        .item(&action!("menu:zoom-in", "Zoom In"))
-        .item(&action!("menu:zoom-out", "Zoom Out"))
-        .item(&action!("menu:zoom-reset", "Zoom to 100%"))
-        .item(&check!("menu:lock-zoom", "Lock Zoom (Ignore Pinch)"))
-        .item(&check!("menu:edge-pan", "Pan by Moving to Edges"))
+        .item(&action!("menu:zoom-in", tr("Zoom In")))
+        .item(&action!("menu:zoom-out", tr("Zoom Out")))
+        .item(&action!("menu:zoom-reset", tr("Zoom to 100%")))
+        .item(&check!("menu:lock-zoom", tr("Lock Zoom (Ignore Pinch)")))
+        .item(&check!("menu:edge-pan", tr("Pan by Moving to Edges")))
         .separator()
         .item(&displays)
         .item(&resolution)
         .item(&pointers)
         .separator()
         .item(&toggle_toolbar)
-        .item(&check!(HIDE_TOOLBAR, "Hide the Floating Toolbar"))
+        .item(&check!(HIDE_TOOLBAR, tr("Hide the Floating Toolbar")))
         .build()?;
 
-    let gray = SubmenuBuilder::new(app, "Gray Levels")
-        .item(&check!("menu:gray:256", "256 Levels"))
-        .item(&check!("menu:gray:16", "16 Levels"))
-        .item(&check!("menu:gray:8", "8 Levels"))
-        .item(&check!("menu:gray:4", "4 Levels"))
-        .item(&check!("menu:gray:2", "2 Levels"))
-        .item(&check!("menu:gray:1", "1-bit (Dithered)"))
+    let gray = SubmenuBuilder::new(app, tr("Gray Levels"))
+        .item(&check!("menu:gray:256", tr_count("{count} Levels", 256)))
+        .item(&check!("menu:gray:16", tr_count("{count} Levels", 16)))
+        .item(&check!("menu:gray:8", tr_count("{count} Levels", 8)))
+        .item(&check!("menu:gray:4", tr_count("{count} Levels", 4)))
+        .item(&check!("menu:gray:2", tr_count("{count} Levels", 2)))
+        .item(&check!("menu:gray:1", tr("1-bit (Dithered)")))
         .build()?;
 
     // Named for the trade the person is making, picture sharpness against how
@@ -402,65 +409,50 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     // afford it and steps down while the client is saturated, which is what a
     // video playing on the remote needs (measured: a right-click menu went
     // from 2208 ms to 346 ms once Auto dropped the quality by itself).
-    let quality = SubmenuBuilder::new(app, "Quality")
-        .item(&check!(
-            "menu:quality:auto",
-            "Auto (sharp when idle, faster under load)"
-        ))
-        .item(&check!(
-            "menu:quality:high",
-            "Sharp (best picture, never adapts)"
-        ))
-        .item(&check!("menu:quality:medium", "Balanced"))
-        .item(&check!(
-            "menu:quality:low",
-            "Responsive (softer picture, lowest lag)"
-        ))
-        .item(&check!("menu:quality:bw", "Black & White"))
+    let quality = SubmenuBuilder::new(app, tr("Quality"))
+        .item(&check!("menu:quality:auto", tr("Auto (sharp when idle, faster under load)")))
+        .item(&check!("menu:quality:high", tr("Sharp (best picture, never adapts)")))
+        .item(&check!("menu:quality:medium", tr("Balanced")))
+        .item(&check!("menu:quality:low", tr("Responsive (softer picture, lowest lag)")))
+        .item(&check!("menu:quality:bw", tr("Black & White")))
         .separator()
         .item(&gray)
         .separator()
-        .item(&check!(
-            "menu:always-refresh",
-            "Always Request Fresh Frames"
-        ))
+        .item(&check!("menu:always-refresh", tr("Always Request Fresh Frames")))
         .build()?;
     gated_menus.push(quality.clone());
 
-    let keyboard = SubmenuBuilder::new(app, "Keyboard")
-        .item(&check!(
-            "menu:passthrough",
-            "Pass System Shortcuts to Remote"
-        ))
+    let keyboard = SubmenuBuilder::new(app, tr("Keyboard"))
+        .item(&check!("menu:passthrough", tr("Pass System Shortcuts to Remote")))
         .separator()
-        .item(&action!("menu:send-cad", "Send Ctrl+Alt+Del"))
-        .item(&action!("menu:send-cmd-tab", "Send Cmd/Alt+Tab"))
-        .item(&action!("menu:send-win", "Send Windows/Super Key"))
-        .item(&action!("menu:send-alt-f4", "Send Alt+F4"))
-        .item(&action!("menu:send-escape", "Send Escape"))
+        .item(&action!("menu:send-cad", tr("Send Ctrl+Alt+Del")))
+        .item(&action!("menu:send-cmd-tab", tr("Send Cmd/Alt+Tab")))
+        .item(&action!("menu:send-win", tr("Send Windows/Super Key")))
+        .item(&action!("menu:send-alt-f4", tr("Send Alt+F4")))
+        .item(&action!("menu:send-escape", tr("Send Escape")))
         .separator()
-        .item(&action!("menu:release-keys", "Release All Keys"))
+        .item(&action!("menu:release-keys", tr("Release All Keys")))
         .build()?;
     gated_menus.push(keyboard.clone());
 
     // Gated on the SSH probe as well as on a session, so it is held out of
     // `gated_items` and enabled by hand in `SessionMenu::set_live`.
-    let files = MenuItemBuilder::with_id("menu:files", FILES_LABEL)
+    let files = MenuItemBuilder::with_id("menu:files", files_label())
         .enabled(false)
         .build(app)?;
 
-    let session = SubmenuBuilder::new(app, "Session")
-        .item(&action!("menu:connection-info", "Connection Info…"))
+    let session = SubmenuBuilder::new(app, tr("Session"))
+        .item(&action!("menu:connection-info", tr("Connection Info…")))
         .separator()
         .item(&quality)
-        .item(&check!("menu:view-only", "View Only"))
-        .item(&action!("menu:refresh", "Refresh Screen"))
+        .item(&check!("menu:view-only", tr("View Only")))
+        .item(&action!("menu:refresh", tr("Refresh Screen")))
         .separator()
         .item(&keyboard)
         .separator()
-        .item(&action!("menu:clipboard-send", "Send Clipboard to Remote"))
+        .item(&action!("menu:clipboard-send", tr("Send Clipboard to Remote")))
         .item(&files)
-        .item(&action!("menu:screenshot", "Save Screenshot"))
+        .item(&action!("menu:screenshot", tr("Save Screenshot")))
         .build()?;
 
     // Tab navigation lives on the native menu rather than in the webview
@@ -473,24 +465,24 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     // `CmdOrCtrl+Shift+W` for Close Tab, not the more usual `CmdOrCtrl+W`:
     // that one belongs to the predefined Close Window item below, and two
     // items cannot share an accelerator.
-    let window_menu = SubmenuBuilder::new(app, "Window")
+    let window_menu = SubmenuBuilder::new(app, tr("Window"))
         .item(
-            &MenuItemBuilder::with_id("menu:tab:library", "Show Library")
+            &MenuItemBuilder::with_id("menu:tab:library", tr("Show Library"))
                 .accelerator("CmdOrCtrl+Shift+L")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id("menu:tab:next", "Next Tab")
+            &MenuItemBuilder::with_id("menu:tab:next", tr("Next Tab"))
                 .accelerator("Ctrl+Tab")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id("menu:tab:prev", "Previous Tab")
+            &MenuItemBuilder::with_id("menu:tab:prev", tr("Previous Tab"))
                 .accelerator("Ctrl+Shift+Tab")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id("menu:tab:close", "Close Tab")
+            &MenuItemBuilder::with_id("menu:tab:close", tr("Close Tab"))
                 .accelerator("CmdOrCtrl+Shift+W")
                 .build(app)?,
         )
@@ -505,32 +497,32 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         // and a chord that closed a pane when the user meant the tab is the
         // kind of near miss that costs a connection.
         .item(
-            &MenuItemBuilder::with_id("menu:pane:split-right", "Split Right")
+            &MenuItemBuilder::with_id("menu:pane:split-right", tr("Split Right"))
                 .accelerator("CmdOrCtrl+Alt+D")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id("menu:pane:split-down", "Split Down")
+            &MenuItemBuilder::with_id("menu:pane:split-down", tr("Split Down"))
                 .accelerator("CmdOrCtrl+Alt+Shift+D")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id("menu:pane:next", "Next Pane")
+            &MenuItemBuilder::with_id("menu:pane:next", tr("Next Pane"))
                 .accelerator("CmdOrCtrl+Alt+]")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id("menu:pane:prev", "Previous Pane")
+            &MenuItemBuilder::with_id("menu:pane:prev", tr("Previous Pane"))
                 .accelerator("CmdOrCtrl+Alt+[")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id("menu:pane:zoom", "Maximise Pane")
+            &MenuItemBuilder::with_id("menu:pane:zoom", tr("Maximise Pane"))
                 .accelerator("CmdOrCtrl+Alt+Z")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id("menu:pane:even", "Even Out Panes")
+            &MenuItemBuilder::with_id("menu:pane:even", tr("Even Out Panes"))
                 .accelerator("CmdOrCtrl+Alt+=")
                 .build(app)?,
         )
@@ -540,44 +532,44 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         // menu item. Whatever is already connected in the tab is kept and
         // re-placed, and the rest of the panes come up empty.
         .item(
-            &SubmenuBuilder::new(app, "Arrange")
-                .item(&action!("menu:pane:grid:2", "2 Panes"))
-                .item(&action!("menu:pane:grid:3", "3 Panes"))
-                .item(&action!("menu:pane:grid:4", "4 Panes"))
-                .item(&action!("menu:pane:grid:6", "6 Panes"))
-                .item(&action!("menu:pane:grid:8", "8 Panes"))
-                .item(&action!("menu:pane:grid:9", "9 Panes"))
-                .item(&action!("menu:pane:grid:12", "12 Panes"))
+            &SubmenuBuilder::new(app, tr("Arrange"))
+                .item(&action!("menu:pane:grid:2", tr_count("{count} Panes", 2)))
+                .item(&action!("menu:pane:grid:3", tr_count("{count} Panes", 3)))
+                .item(&action!("menu:pane:grid:4", tr_count("{count} Panes", 4)))
+                .item(&action!("menu:pane:grid:6", tr_count("{count} Panes", 6)))
+                .item(&action!("menu:pane:grid:8", tr_count("{count} Panes", 8)))
+                .item(&action!("menu:pane:grid:9", tr_count("{count} Panes", 9)))
+                .item(&action!("menu:pane:grid:12", tr_count("{count} Panes", 12)))
                 .build()?,
         )
         .item(
-            &MenuItemBuilder::with_id("menu:pane:close", "Close Pane")
+            &MenuItemBuilder::with_id("menu:pane:close", tr("Close Pane"))
                 .accelerator("CmdOrCtrl+Alt+W")
                 .build(app)?,
         )
         .separator()
-        .minimize()
-        .maximize()
+        .minimize_with_text(tr("Minimize"))
+        .maximize_with_text(tr("Maximize"))
         .separator()
-        .close_window()
+        .close_window_with_text(tr("Close Window"))
         .build()?;
 
     // "Help" opens the in-app dialog (routed to the frontend) rather than a
     // URL, so it still works with no network. "Project page" is the one that
     // deliberately leaves the app.
     #[allow(unused_mut)] // only reassigned in the non-macOS branch below
-    let mut help_builder = SubmenuBuilder::new(app, "Help")
-        .item(&MenuItemBuilder::with_id("menu:about", "DeskVNCViewer Help").build(app)?)
+    let mut help_builder = SubmenuBuilder::new(app, tr("Help"))
+        .item(&MenuItemBuilder::with_id("menu:about", tr("DeskVNCViewer Help")).build(app)?)
         .separator()
-        .item(&MenuItemBuilder::with_id("menu:project", "Project Page").build(app)?)
-        .item(&MenuItemBuilder::with_id("menu:contact", "Contact Developer…").build(app)?);
+        .item(&MenuItemBuilder::with_id("menu:project", tr("Project Page")).build(app)?)
+        .item(&MenuItemBuilder::with_id("menu:contact", tr("Contact Developer…")).build(app)?);
     // macOS already carries About in the application menu; everywhere else it
     // belongs under Help.
     #[cfg(not(target_os = "macos"))]
     {
         help_builder = help_builder
             .separator()
-            .item(&MenuItemBuilder::with_id("menu:about", "About DeskVNCViewer").build(app)?);
+            .item(&MenuItemBuilder::with_id("menu:about", tr("About DeskVNCViewer")).build(app)?);
     }
     let help = help_builder.build()?;
 
@@ -594,7 +586,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .build()?;
     app.set_menu(menu)?;
 
-    app.manage(Mutex::new(SessionMenu {
+    Ok(SessionMenu {
         displays,
         resolution,
         checks,
@@ -603,11 +595,32 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         files,
         toggle_toolbar,
         displays_sig: String::new(),
-    }));
+        last: None,
+    })
+}
 
+pub fn install(app: &AppHandle) -> tauri::Result<()> {
+    let menu = build(app)?;
+    app.manage(Mutex::new(menu));
     app.on_menu_event(|app, event| {
         handle_menu_event(app, event.id().as_ref());
     });
+    Ok(())
+}
+
+/// Build the menu again in the language now in use, and put back the state
+/// the webview last pushed. Called from an async command, never on the main
+/// thread, for the reason `sync_session_menu` gives.
+pub fn relabel(app: &AppHandle) -> tauri::Result<()> {
+    let Some(state) = app.try_state::<Mutex<SessionMenu>>() else {
+        return install(app);
+    };
+    let last = state.lock().last.take();
+    let fresh = build(app)?;
+    *state.lock() = fresh;
+    if let Some(last) = last {
+        sync(app, last);
+    }
     Ok(())
 }
 
@@ -617,6 +630,7 @@ pub fn sync(app: &AppHandle, update: MenuSync) {
         return;
     };
     let mut menu = state.lock();
+    menu.last = Some(update.clone());
     tracing::debug!(
         hide_toolbar = update.hide_toolbar,
         live = update.session.is_some(),
@@ -705,7 +719,7 @@ fn rebuild_displays(
     displays.append(&CheckMenuItem::with_id(
         app,
         "menu:display:all",
-        "All Displays",
+        tr("All Displays"),
         true,
         state.display_id.is_none(),
         None::<&str>,
@@ -730,7 +744,7 @@ fn rebuild_displays(
     if !state.layout_known {
         displays.append(&PredefinedMenuItem::separator(app)?)?;
         displays.append(
-            &MenuItemBuilder::with_id("menu:detect-displays", "Detect Displays Again")
+            &MenuItemBuilder::with_id("menu:detect-displays", tr("Detect Displays Again"))
                 .build(app)?,
         )?;
     }
@@ -850,15 +864,15 @@ mod tests {
     fn file_transfer_is_never_offered_on_an_ssh_tab() {
         // The probe answer an SSH tab inherits from the desktop tab before it
         // must not turn the item back on.
-        assert_eq!(files_item(true, true, true), (false, FILES_LABEL_TERMINAL));
-        assert_eq!(files_item(true, false, true), (false, FILES_LABEL_TERMINAL));
+        assert_eq!(files_item(true, true, true), (false, files_label_terminal()));
+        assert_eq!(files_item(true, false, true), (false, files_label_terminal()));
     }
 
     #[test]
     fn file_transfer_follows_the_probe_on_a_desktop_session() {
-        assert_eq!(files_item(true, true, false), (true, FILES_LABEL));
-        assert_eq!(files_item(true, false, false), (false, FILES_LABEL));
-        assert_eq!(files_item(false, true, false), (false, FILES_LABEL));
+        assert_eq!(files_item(true, true, false), (true, files_label()));
+        assert_eq!(files_item(true, false, false), (false, files_label()));
+        assert_eq!(files_item(false, true, false), (false, files_label()));
     }
 
     #[test]
