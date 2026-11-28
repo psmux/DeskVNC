@@ -69,6 +69,12 @@ pub enum ClientCommand {
     },
     /// User dismissed the credentials prompt, abandon the connection attempt.
     CancelCredentials,
+    /// The answer to a Mac's session choice (`MacSessionEvent::Choose`):
+    /// `share` asks the person at the Mac to share their screen, otherwise a
+    /// separate session. Dismissing the choice is `CancelCredentials`.
+    ChooseMacSession {
+        share: bool,
+    },
     /// Reset backoff and retry immediately (network came back / user clicked).
     ReconnectNow,
     Disconnect,

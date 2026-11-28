@@ -1071,7 +1071,10 @@ async fn probe_select_once(t: &Target, pref: &str, init: u8, command: Option<u8>
     loop {
         match tokio::time::timeout_at(deadline, s.read(&mut buf)).await {
             Ok(Ok(0)) => {
-                eprintln!("LIVE select {pref} cmd {cmd}: closed after {:?}", sent.elapsed());
+                eprintln!(
+                    "LIVE select {pref} cmd {cmd}: closed after {:?}",
+                    sent.elapsed()
+                );
                 break;
             }
             Ok(Ok(n)) => eprintln!(

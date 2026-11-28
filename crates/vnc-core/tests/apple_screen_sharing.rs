@@ -37,7 +37,8 @@ use vnc_core::proto::messages::encode_pixel_format;
 use vnc_core::security::apple_srp::{GROUP_4096_G, GROUP_4096_HEX};
 use vnc_core::security::select_security_type;
 use vnc_core::types::{
-    ClientCommand, ConnectOptions, Credentials, PinScheme, PixelFormat, SecurityType, SessionEvent,
+    ClientCommand, ConnectOptions, Credentials, MacSessionEvent, PinScheme, PixelFormat,
+    ProtocolEvent, SecurityType, SessionEvent, SessionState,
 };
 
 const USER: &str = "tester";
@@ -402,6 +403,35 @@ struct Seen {
     /// Run the short session (desktop size, full picture, then answer
     /// requests) after a type 33 login too, not only after type 36.
     short_session: bool,
+    /// Act like a Mac that packs flags into the ServerInit name and, with
+    /// flag 0x04, offers a choice of session.
+    select: Option<Select>,
+    /// The SessionCommand the viewer sent.
+    session_command: Option<Vec<u8>>,
+}
+
+/// What a fake Mac with someone at its screen does after ClientInit.
+#[derive(Clone, Default)]
+struct Select {
+    /// The flags word in the extended ServerInit name.
+    flags: u32,
+    /// Who is logged in at the Mac; empty for nobody.
+    console_user: &'static str,
+    /// The allowed command bits in SessionInfo.
+    allowed: u32,
+    /// Each SessionResult sent after the command, with the pause before it.
+    /// A last status that is not a grant ends the connection.
+    results: Vec<(Duration, u32)>,
+}
+
+/// A SessionResult as a Mac sends it: size 80, version 1, status, and a
+/// reserved tail.
+fn session_result(status: u32) -> Vec<u8> {
+    let mut v = 80u16.to_be_bytes().to_vec();
+    v.extend_from_slice(&1u16.to_be_bytes());
+    v.extend_from_slice(&status.to_be_bytes());
+    v.extend_from_slice(&[0; 74]);
+    v
 }
 
 struct FakeMac {
@@ -436,12 +466,34 @@ impl FakeMac {
     }
 
     async fn start_with(login: Login, password: &'static str, refuse_after_proof: bool) -> Self {
+        Self::start_seen(
+            login,
+            password,
+            Seen {
+                refuse_after_proof,
+                ..Seen::default()
+            },
+        )
+        .await
+    }
+
+    /// A type 36 Mac that runs `select` after ClientInit.
+    async fn start_select(select: Select) -> Self {
+        Self::start_seen(
+            Login::Srp36,
+            PASSWORD,
+            Seen {
+                select: Some(select),
+                ..Seen::default()
+            },
+        )
+        .await
+    }
+
+    async fn start_seen(login: Login, password: &'static str, seen: Seen) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let seen = Arc::new(Mutex::new(Seen {
-            refuse_after_proof,
-            ..Seen::default()
-        }));
+        let seen = Arc::new(Mutex::new(seen));
         let s2 = seen.clone();
         let key = if login == Login::Rsa33 {
             Some(
@@ -693,10 +745,49 @@ async fn serve(
     let mut si = WIDTH.to_be_bytes().to_vec();
     si.extend_from_slice(&HEIGHT.to_be_bytes());
     si.extend_from_slice(&encode_pixel_format(&PixelFormat::bgra8888()));
-    let name = b"Fake Mac";
+    let select = seen.lock().select.clone();
+    let mut name = Vec::new();
+    if let Some(sel) = &select {
+        // The marker, the flags, a capability bitmap, then the name.
+        name.extend_from_slice(&[0, 1]);
+        name.extend_from_slice(&sel.flags.to_be_bytes());
+        name.extend_from_slice(&[0x5A; 16]);
+        name.push(0);
+    }
+    name.extend_from_slice(b"Fake Mac");
     si.extend_from_slice(&(name.len() as u32).to_be_bytes());
-    si.extend_from_slice(name);
+    si.extend_from_slice(&name);
     s.write_all(&si).await.unwrap();
+
+    // --- session choice ---------------------------------------------------------
+    if let Some(sel) = select.filter(|sel| sel.flags & 0x04 != 0) {
+        let user = sel.console_user.as_bytes();
+        let mut info = ((10 + user.len() + 1) as u16).to_be_bytes().to_vec();
+        info.extend_from_slice(&1u16.to_be_bytes());
+        info.extend_from_slice(&sel.allowed.to_be_bytes());
+        info.extend_from_slice(&[0; 4]);
+        info.extend_from_slice(user);
+        info.push(0);
+        s.write_all(&info).await.unwrap();
+        // Exactly one 74 byte SessionCommand before anything else. A viewer
+        // that sends its prelude here instead never gets an answer, as with
+        // a real Mac that reads the prelude as a malformed command.
+        let cmd = read_n(s, 74).await;
+        let ok = cmd[..4] == [0, 72, 0, 1];
+        seen.lock().session_command = Some(cmd);
+        if !ok {
+            std::future::pending::<()>().await;
+        }
+        let mut granted = false;
+        for (pause, status) in &sel.results {
+            tokio::time::sleep(*pause).await;
+            s.write_all(&session_result(*status)).await.unwrap();
+            granted = matches!(status, 0 | 4);
+        }
+        if !granted {
+            return;
+        }
+    }
 
     // --- cleartext prelude ----------------------------------------------------
     // ViewerInfo, SetEncryption(1), SetMode(1), SetEncryption(2). Like a real
@@ -1746,4 +1837,249 @@ mod live_must_confirm {
         let l = apple_wire::parse_display_layout(&body[2..]).unwrap();
         assert_eq!(l.leading, Some([1920, 1080, 3840, 2160]));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Choosing the session on a Mac with someone at its screen
+// ---------------------------------------------------------------------------
+
+const ANNA: &str = "anna";
+
+fn select_options(port: u16, choice: vnc_core::types::MacSessionChoice) -> ConnectOptions {
+    let mut o = session_options(port, PASSWORD);
+    o.vnc_mut().security_pref = Some("apple-srp".into());
+    o.vnc_mut().mac_session = choice;
+    o
+}
+
+fn mac_event(e: &SessionEvent) -> Option<MacSessionEvent> {
+    match e {
+        SessionEvent::Protocol(ProtocolEvent::MacSession(m)) => Some(m.clone()),
+        _ => None,
+    }
+}
+
+fn command_byte(mac: &FakeMac) -> u8 {
+    let seen = mac.seen.lock();
+    let cmd = seen.session_command.as_ref().expect("a SessionCommand");
+    cmd[8]
+}
+
+fn command_user(mac: &FakeMac) -> String {
+    let seen = mac.seen.lock();
+    let cmd = seen.session_command.as_ref().expect("a SessionCommand");
+    let field = &cmd[10..74];
+    let end = field.iter().position(|&b| b == 0).unwrap();
+    String::from_utf8(field[..end].to_vec()).unwrap()
+}
+
+/// Set to share: no question for the viewer, command 1 naming the person at
+/// the Mac, a grant, and then the encrypted session draws as usual. The
+/// desktop name is the readable one, not the packed flags.
+#[tokio::test]
+async fn a_granted_share_starts_the_session() {
+    let mac = FakeMac::start_select(Select {
+        flags: 0x07,
+        console_user: ANNA,
+        allowed: 0b111,
+        results: vec![(Duration::ZERO, 0)],
+    })
+    .await;
+    let (handle, mut events) = spawn_session(select_options(
+        mac.port,
+        vnc_core::types::MacSessionChoice::Share,
+    ));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    send(&handle, ClientCommand::Disconnect).await;
+    assert_eq!(command_byte(&mac), 1);
+    assert_eq!(command_user(&mac), ANNA);
+    assert!(events.any(|e| matches!(e, SessionEvent::DesktopName(n) if n == "Fake Mac")));
+    assert!(!events.any(|e| matches!(mac_event(e), Some(MacSessionEvent::Choose { .. }))));
+    assert!(events.any(|e| mac_event(e) == Some(MacSessionEvent::Granted)));
+    assert_eq!(
+        mac.seen.lock().prelude.len(),
+        4,
+        "the prelude followed the grant"
+    );
+}
+
+/// Set to ask: the viewer is asked, picks share, sees the waiting state, and
+/// the Mac's answer may take longer than the connect timeout. Pending, then
+/// granted after the wait, then the session.
+#[tokio::test]
+async fn ask_then_pending_then_granted_outlasts_the_connect_timeout() {
+    let mac = FakeMac::start_select(Select {
+        flags: 0x07,
+        console_user: ANNA,
+        allowed: 0b111,
+        results: vec![
+            (Duration::from_millis(100), 2),
+            (Duration::from_millis(1500), 3),
+            (Duration::from_millis(1500), 4),
+        ],
+    })
+    .await;
+    let mut o = select_options(mac.port, vnc_core::types::MacSessionChoice::Ask);
+    o.connect_timeout = Duration::from_secs(2);
+    let (handle, mut events) = spawn_session(o);
+    let choose = events
+        .wait(DEFAULT_TIMEOUT, "the session choice", mac_event)
+        .await;
+    assert_eq!(
+        choose,
+        MacSessionEvent::Choose {
+            console_user: ANNA.into(),
+            can_share: true,
+            can_separate: true,
+        }
+    );
+    send(&handle, ClientCommand::ChooseMacSession { share: true }).await;
+    let waiting = events
+        .wait(DEFAULT_TIMEOUT, "the waiting state", |e| {
+            mac_event(e).filter(|m| matches!(m, MacSessionEvent::Waiting { .. }))
+        })
+        .await;
+    assert_eq!(
+        waiting,
+        MacSessionEvent::Waiting {
+            console_user: ANNA.into()
+        }
+    );
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    send(&handle, ClientCommand::Disconnect).await;
+    assert_eq!(command_byte(&mac), 1);
+}
+
+/// The person at the Mac declines: the viewer is told so, and the session
+/// does not reconnect on its own, which would only ask them again.
+#[tokio::test]
+async fn a_refused_share_says_so_and_does_not_retry() {
+    let mac = FakeMac::start_select(Select {
+        flags: 0x07,
+        console_user: ANNA,
+        allowed: 0b111,
+        results: vec![
+            (Duration::from_millis(100), 2),
+            (Duration::from_millis(200), 1),
+        ],
+    })
+    .await;
+    let mut o = select_options(mac.port, vnc_core::types::MacSessionChoice::Share);
+    o.reconnect.enabled = true;
+    let (_handle, mut events) = spawn_session(o);
+    let (reason, can_retry) = events
+        .wait_state(DEFAULT_TIMEOUT, "the refusal", |s| match s {
+            SessionState::Disconnected {
+                reason, can_retry, ..
+            } => Some((reason.clone(), *can_retry)),
+            _ => None,
+        })
+        .await;
+    assert!(reason.contains("anna did not accept"), "{reason}");
+    assert!(!can_retry);
+    assert!(!events.any(|e| matches!(
+        e,
+        SessionEvent::StateChanged(SessionState::Reconnecting { .. })
+    )));
+    assert!(mac.seen.lock().prelude.is_empty());
+}
+
+/// Nobody logged in at the Mac: nobody to ask, so no question even when set
+/// to ask, and the console is requested with command 0 when command 1 is not
+/// allowed. The Mac's own login window is what the viewer then sees.
+#[tokio::test]
+async fn nobody_logged_in_takes_the_console_without_asking() {
+    let mac = FakeMac::start_select(Select {
+        flags: 0x07,
+        console_user: "",
+        allowed: 0b101,
+        results: vec![(Duration::ZERO, 0)],
+    })
+    .await;
+    let (handle, mut events) = spawn_session(select_options(
+        mac.port,
+        vnc_core::types::MacSessionChoice::Ask,
+    ));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    send(&handle, ClientCommand::Disconnect).await;
+    assert_eq!(command_byte(&mac), 0);
+    assert_eq!(command_user(&mac), "");
+    assert!(!events.any(|e| matches!(
+        mac_event(e),
+        Some(MacSessionEvent::Choose { .. } | MacSessionEvent::Waiting { .. })
+    )));
+}
+
+/// Asked, the viewer picks a separate session: command 2, no waiting state.
+#[tokio::test]
+async fn ask_then_separate_sends_command_two() {
+    let mac = FakeMac::start_select(Select {
+        flags: 0x07,
+        console_user: ANNA,
+        allowed: 0b111,
+        results: vec![(Duration::ZERO, 0)],
+    })
+    .await;
+    let (handle, mut events) = spawn_session(select_options(
+        mac.port,
+        vnc_core::types::MacSessionChoice::Ask,
+    ));
+    events
+        .wait(DEFAULT_TIMEOUT, "the session choice", mac_event)
+        .await;
+    send(&handle, ClientCommand::ChooseMacSession { share: false }).await;
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    send(&handle, ClientCommand::Disconnect).await;
+    assert_eq!(command_byte(&mac), 2);
+    assert!(!events.any(|e| matches!(mac_event(e), Some(MacSessionEvent::Waiting { .. }))));
+}
+
+/// Cancelling the question ends the attempt without sending a command.
+#[tokio::test]
+async fn cancelling_the_choice_sends_nothing() {
+    let mac = FakeMac::start_select(Select {
+        flags: 0x07,
+        console_user: ANNA,
+        allowed: 0b111,
+        results: vec![(Duration::ZERO, 0)],
+    })
+    .await;
+    let (handle, mut events) = spawn_session(select_options(
+        mac.port,
+        vnc_core::types::MacSessionChoice::Ask,
+    ));
+    events
+        .wait(DEFAULT_TIMEOUT, "the session choice", mac_event)
+        .await;
+    send(&handle, ClientCommand::CancelCredentials).await;
+    events
+        .wait_state(DEFAULT_TIMEOUT, "the end", |s| match s {
+            SessionState::Disconnected { .. } => Some(()),
+            _ => None,
+        })
+        .await;
+    assert!(mac.seen.lock().session_command.is_none());
+}
+
+/// An extended ServerInit without flag 0x04: no choice, the prelude follows
+/// at once, as before, and the name is the readable one.
+#[tokio::test]
+async fn flags_without_session_select_go_straight_to_the_prelude() {
+    let mac = FakeMac::start_select(Select {
+        flags: 0x03,
+        ..Select::default()
+    })
+    .await;
+    let (handle, mut events) = spawn_session(select_options(
+        mac.port,
+        vnc_core::types::MacSessionChoice::Ask,
+    ));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    send(&handle, ClientCommand::Disconnect).await;
+    assert!(mac.seen.lock().session_command.is_none());
+    assert!(events.any(|e| matches!(e, SessionEvent::DesktopName(n) if n == "Fake Mac")));
+    assert!(!events.any(|e| mac_event(e).is_some()));
 }

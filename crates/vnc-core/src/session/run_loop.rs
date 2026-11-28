@@ -1054,6 +1054,19 @@ impl RunLoop {
                         tracing::debug!("the clipboard on the Mac changed; fetching it");
                         self.send(&crate::apple::wire::clipboard_fetch()).await?;
                     }
+                    crate::apple::wire::misc::SESSION_CHANGED => {
+                        // The screen changed hands (a login, a lock, a fast
+                        // user switch). A layout message usually follows and
+                        // re-arms updates on its own; asking for the whole
+                        // picture here as well keeps a shared screen from
+                        // freezing on a Mac that sends none.
+                        tracing::info!("the Mac says its user session changed");
+                        let full = self.full_rect();
+                        self.send(&messages::framebuffer_update_request(false, full))
+                            .await?;
+                        self.send(&crate::apple::wire::auto_framebuffer_update(full))
+                            .await?;
+                    }
                     other => tracing::debug!(cmd = other, "Mac status message"),
                 }
                 Ok(())
@@ -2186,7 +2199,9 @@ impl RunLoop {
             // Handshake-time commands. If one arrives while connected the
             // prompt has already been answered (or the UI double-sent), so
             // there is nothing to do, never treat it as a protocol error.
-            ClientCommand::ProvideCredentials { .. } | ClientCommand::CancelCredentials => {
+            ClientCommand::ProvideCredentials { .. }
+            | ClientCommand::CancelCredentials
+            | ClientCommand::ChooseMacSession { .. } => {
                 tracing::debug!("credential command received while connected; ignoring");
             }
             // A terminal command reaching a framebuffer session means the

@@ -21,6 +21,7 @@
 //! ```
 
 pub mod record;
+pub mod select;
 pub mod wire;
 
 use tokio::io::AsyncReadExt;
